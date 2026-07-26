@@ -2,7 +2,7 @@
 // @name         ExHentai Absolute Proof Downloader (Visible Timer)
 // @namespace    http://tampermonkey.net/
 // @version      10.5
-// @description  Скачивает оригиналы по очереди. Показывает таймер обратного отсчёта до следующего обновления квоты.
+// @description  Downloads originals sequentially. Shows a countdown timer for the next quota update.
 // @author       Nyashers
 // @match        *://exhentai.org/g/*
 // @match        *://e-hentai.org/g/*
@@ -15,9 +15,9 @@
 (function() {
     'use strict';
 
-    // === Стили в духе ExHentai ===
+    // === ExHentai Styled CSS ===
     GM_addStyle(`
-        /* Панель управления над галереей */
+        /* Top Control Bar above gallery */
         #eh-top-control-bar {
             background: #34353b;
             border: 1px solid #4f535b;
@@ -83,7 +83,7 @@
             white-space: nowrap;
         }
 
-        /* Кнопки на превью */
+        /* Preview Buttons */
         .eh-dl-btn {
             position: absolute;
             top: 6px;
@@ -111,7 +111,7 @@
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.8);
         }
 
-        /* Состояния кнопок */
+        /* Button States */
         .eh-dl-btn.state-queued {
             color: #f39c12;
             border-color: #d39e00;
@@ -138,7 +138,7 @@
             background: #331212;
         }
 
-        /* Менеджер Загрузок */
+        /* Download Manager */
         #eh-dl-manager {
             position: fixed;
             bottom: 20px;
@@ -184,7 +184,7 @@
             color: #ffffff;
         }
 
-        /* Прогресс-бар */
+        /* Progress Bar */
         .eh-progress-bg {
             background: #18191c;
             border: 1px solid #4f535b;
@@ -214,6 +214,7 @@
             text-shadow: 1px 1px 2px #000;
         }
 
+        /* Queue List */
         .eh-mgr-queue-list {
             margin-top: 10px;
             border-top: 1px solid #4f535b;
@@ -229,7 +230,7 @@
         }
     `);
 
-    // === Утилиты ===
+    // === Utilities ===
     function sanitizeFilename(name) {
         return name.replace(/[\\/:*?"<>|]/g, "_").replace(/\s+/g, " ").trim();
     }
@@ -251,17 +252,17 @@
         btn.innerText = text;
         setTimeout(() => {
             btn.className = 'eh-dl-btn';
-            btn.innerText = '⬇ Скачать';
+            btn.innerText = '⬇ Download';
         }, 5000);
     }
 
-    // === Переменные квоты и таймера ===
+    // === Quota & Timer Variables ===
     let lastParsedQuotaNum = null;
     let isFetchingQuota = false;
     let idleTimerSeconds = 60;
     let idleIntervalId = null;
 
-    // === Получение Image Limits с e-hentai.org/home.php ===
+    // === Fetch Image Limits from e-hentai.org/home.php ===
     function fetchImageLimits(onCompleteCallback) {
         if (isFetchingQuota) return;
         isFetchingQuota = true;
@@ -274,7 +275,7 @@
             anonymous: false,
             onload: function(res) {
                 isFetchingQuota = false;
-                resetIdleTimer(); // Сбрасываем таймер обратного отсчёта при получении ответа
+                resetIdleTimer();
 
                 if (res.status === 200) {
                     const parser = new DOMParser();
@@ -308,7 +309,7 @@
                             return;
                         }
                     }
-                    updateQuotaUI("Не найдено", "");
+                    updateQuotaUI("Not found", "");
                 } else {
                     updateQuotaUI("Err: HTTP " + res.status, "");
                 }
@@ -317,7 +318,7 @@
             onerror: function() {
                 isFetchingQuota = false;
                 resetIdleTimer();
-                updateQuotaUI("Ошибка сети", "");
+                updateQuotaUI("Network error", "");
                 if (onCompleteCallback) onCompleteCallback();
             }
         });
@@ -327,11 +328,11 @@
         const topQuotaText = document.querySelector('#eh-quota-value');
         const mgrQuotaEl = document.querySelector('#eh-mgr-quota');
 
-        if (topQuotaText) topQuotaText.innerHTML = `Лимит картинок: <b>${str}</b> ${diffHtml}`;
+        if (topQuotaText) topQuotaText.innerHTML = `Image Limits: <b>${str}</b> ${diffHtml}`;
         if (mgrQuotaEl) mgrQuotaEl.innerHTML = `Quota: ${str} ${diffHtml}`;
     }
 
-    // === Управление таймером обратного отсчёта ===
+    // === Countdown Timer Controls ===
     function startIdleTimer() {
         if (idleIntervalId) clearInterval(idleIntervalId);
 
@@ -359,13 +360,13 @@
         if (!timerEl) return;
 
         if (isProcessing) {
-            timerEl.innerText = `⏱ [Скачивание]`;
+            timerEl.innerText = `⏱ [Downloading]`;
             timerEl.style.color = `#3498db`;
         } else if (document.hidden) {
-            timerEl.innerText = `⏱ [Сон]`;
+            timerEl.innerText = `⏱ [Sleeping]`;
             timerEl.style.color = `#888`;
         } else {
-            timerEl.innerText = `⏱ ${idleTimerSeconds}с`;
+            timerEl.innerText = `⏱ ${idleTimerSeconds}s`;
             timerEl.style.color = `#a0a0a0`;
         }
     }
@@ -373,7 +374,6 @@
     function initIdlePolling() {
         startIdleTimer();
 
-        // При переключении на вкладку — моментальный авто-запрос
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden && !isProcessing) {
                 fetchImageLimits();
@@ -383,7 +383,7 @@
         });
     }
 
-    // === UI Элементы ===
+    // === UI Elements ===
     let managerEl, currentTaskEl, progressBarEl, progressTextEl, queueListEl, queueCountEl;
 
     function createControlBarUI() {
@@ -394,10 +394,10 @@
         bar.id = 'eh-top-control-bar';
         bar.innerHTML = `
             <div class="eh-top-left">
-                <button id="eh-batch-dl-btn" class="eh-top-btn">⬇ Скачать все на странице</button>
+                <button id="eh-batch-dl-btn" class="eh-top-btn">⬇ Download All on Page</button>
                 <div class="eh-quota-badge">
-                    <span id="eh-quota-value">Лимит картинок: <i>Проверка...</i></span>
-                    <span id="eh-quota-timer" class="eh-timer-badge">⏱ 60с</span>
+                    <span id="eh-quota-value">Image Limits: <i>Checking...</i></span>
+                    <span id="eh-quota-timer" class="eh-timer-badge">⏱ 60s</span>
                 </div>
             </div>
             <div style="font-size:11px; color:#a0a0a0;">ExH Downloader v10.5</div>
@@ -413,12 +413,12 @@
         managerEl.id = 'eh-dl-manager';
         managerEl.innerHTML = `
             <div class="eh-mgr-header">
-                <span>Менеджер Загрузок</span>
-                <span id="eh-mgr-count">0 в очереди</span>
+                <span>Download Manager</span>
+                <span id="eh-mgr-count">0 queued</span>
             </div>
             <div class="eh-mgr-body">
                 <div class="eh-mgr-current">
-                    <div id="eh-mgr-title" class="eh-mgr-title">Ожидание...</div>
+                    <div id="eh-mgr-title" class="eh-mgr-title">Idle...</div>
                     <div class="eh-progress-bg">
                         <div id="eh-progress-fill" class="eh-progress-fill"></div>
                         <div id="eh-progress-text" class="eh-progress-text">0%</div>
@@ -426,7 +426,7 @@
                 </div>
                 <div style="display:flex; justify-content:space-between; margin-top:6px; font-size:10px; color:#888;">
                     <span id="eh-mgr-quota">Quota: ...</span>
-                    <span id="eh-mgr-total-progress">Обработано: 0/0</span>
+                    <span id="eh-mgr-total-progress">Processed: 0/0</span>
                 </div>
                 <div id="eh-mgr-queue-list" class="eh-mgr-queue-list"></div>
             </div>
@@ -447,18 +447,18 @@
         }
 
         managerEl.classList.add('active');
-        queueCountEl.innerText = `${downloadQueue.length} в очереди`;
+        queueCountEl.innerText = `${downloadQueue.length} queued`;
 
         const totalProgressEl = managerEl.querySelector('#eh-mgr-total-progress');
         if (totalProgressEl) {
-            totalProgressEl.innerText = `Обработано: ${completedCount}/${totalAddedTasks}`;
+            totalProgressEl.innerText = `Processed: ${completedCount}/${totalAddedTasks}`;
         }
 
         queueListEl.innerHTML = '';
         downloadQueue.slice(0, 5).forEach((item, idx) => {
             const div = document.createElement('div');
             div.className = 'eh-mgr-queue-item';
-            div.innerText = `${idx + 1}. Стр. ${item.pageNum}`;
+            div.innerText = `${idx + 1}. Page ${item.pageNum}`;
             queueListEl.appendChild(div);
         });
 
@@ -466,12 +466,12 @@
             const div = document.createElement('div');
             div.className = 'eh-mgr-queue-item';
             div.style.fontStyle = 'italic';
-            div.innerText = `...и ещё ${downloadQueue.length - 5}`;
+            div.innerText = `...and ${downloadQueue.length - 5} more`;
             queueListEl.appendChild(div);
         }
     }
 
-    // === Очередь и Логика Загрузок ===
+    // === Queue & Download Logic ===
     const downloadQueue = [];
     let isProcessing = false;
     let completedCount = 0;
@@ -512,7 +512,7 @@
         if (exists) return;
 
         task.btn.className = 'eh-dl-btn state-queued';
-        task.btn.innerText = '⏳ В очереди';
+        task.btn.innerText = '⏳ Queued';
 
         downloadQueue.push(task);
         totalAddedTasks++;
@@ -539,13 +539,13 @@
         });
     }
 
-    // === Логика Выкачивания ===
+    // === Download Task Execution ===
     function executeDownload(task, onComplete) {
         const { viewerUrl, pageNum, btn } = task;
 
         btn.className = 'eh-dl-btn state-scan';
-        btn.innerText = '⟳ Поиск...';
-        currentTaskEl.innerText = `Стр. ${pageNum}: Поиск изображения...`;
+        btn.innerText = '⟳ Searching...';
+        currentTaskEl.innerText = `Page ${pageNum}: Searching for image...`;
         progressBarEl.style.width = '0%';
         progressTextEl.innerText = '0%';
 
@@ -586,7 +586,7 @@
                     resStr = resMatch ? resMatch[1].replace(/\s/g, '') : "MaxRes";
                 }
                 else {
-                    showError(btn, 'Err: Файл не найден');
+                    showError(btn, 'Err: File not found');
                     onComplete();
                     return;
                 }
@@ -600,7 +600,7 @@
 
                 btn.className = 'eh-dl-btn state-dl';
                 btn.innerText = `↓ ${labelTag}...`;
-                currentTaskEl.innerText = `Стр. ${pageNum} (${labelTag})`;
+                currentTaskEl.innerText = `Page ${pageNum} (${labelTag})`;
 
                 GM_xmlhttpRequest({
                     method: "GET",
@@ -657,13 +657,13 @@
                 });
             },
             onerror: function() {
-                showError(btn, 'Err: Соединение');
+                showError(btn, 'Err: Connection');
                 onComplete();
             }
         });
     }
 
-    // === Инициализация ===
+    // === Initialization ===
     function init() {
         const items = document.querySelectorAll('#gdt > a');
         if (items.length === 0) return;
@@ -684,7 +684,7 @@
 
             const btn = document.createElement('div');
             btn.className = 'eh-dl-btn';
-            btn.innerText = '⬇ Скачать';
+            btn.innerText = '⬇ Download';
 
             btn.addEventListener('click', (e) => {
                 e.preventDefault();
