@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      1.3.1
-// @description  Downloads originals sequentially or from viewer. Features persistent download memory, live image hover preview (animated), front page gallery peeker (with cursor tracking & scaled sprites), quota countdown, and smooth viewer navigation.
+// @version      1.3.6
+// @description  Downloads originals sequentially or from viewer. Features persistent download memory, Ctrl+Hover live image preview (animated), floating gallery control bar, front page gallery peeker (with Uploader, Language, File Size, and Pages), quota countdown, and smooth viewer navigation.
 // @author       Nyashers
 // @match        *://exhentai.org/*
 // @match        *://e-hentai.org/*
@@ -17,7 +17,7 @@
 (function() {
     'use strict';
 
-    // === Native ExHentai Matte Dark Styling with Smooth Animations & Pixel-Perfect Alignment ===
+    // === Native ExHentai Matte Dark Styling with Floating Bar & Rich Metadata ===
     GM_addStyle(`
         /* Popover Entrance Animations */
         @keyframes ehFadeScaleIn {
@@ -37,17 +37,18 @@
             100% { background-position: 200% 0; }
         }
 
-        /* Top Control Bar (Gallery Page & List Pages) */
+        /* Top Control Bar (Gallery Page & List Pages) - Floating & Sticky */
         #eh-top-control-bar {
-            background: #34353b;
+            background: rgba(52, 53, 59, 0.96);
+            backdrop-filter: blur(8px);
             border: 1px solid #4f535b;
             border-radius: 4px;
             padding: 7px 12px;
-            margin: 10px auto;
+            margin: 8px auto;
             max-width: 1212px;
             width: calc(100% - 20px);
             box-sizing: border-box;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.65);
             display: flex;
             justify-content: space-between;
             align-items: center;
@@ -56,6 +57,9 @@
             font-family: Tahoma, Verdana, Arial, sans-serif;
             color: #edebdf;
             font-size: 12px;
+            position: sticky;
+            top: 8px;
+            z-index: 1000;
         }
 
         .eh-top-left {
@@ -218,6 +222,32 @@
             align-items: center;
             gap: 4px;
             line-height: 1;
+        }
+
+        .eh-hint-badge {
+            background: #25262b;
+            border: 1px dashed #4f535b;
+            border-radius: 3px;
+            height: 26px;
+            padding: 0 8px;
+            box-sizing: border-box;
+            font-size: 11px;
+            color: #a0a0a0;
+            display: inline-flex;
+            align-items: center;
+            line-height: 1;
+            user-select: none;
+        }
+
+        .eh-hint-badge kbd {
+            background: #18191c;
+            border: 1px solid #4f535b;
+            border-radius: 2px;
+            padding: 1px 4px;
+            font-size: 10px;
+            color: #58d68d;
+            font-family: inherit;
+            margin-right: 4px;
         }
 
         /* Clean Thumbnail Download Buttons */
@@ -604,7 +634,7 @@
             box-shadow: 0 8px 32px rgba(0, 0, 0, 0.92);
             display: none;
             width: 470px;
-            min-height: 376px;
+            min-height: 380px;
             max-width: 95vw;
             box-sizing: border-box;
             font-family: Tahoma, Verdana, Arial, sans-serif;
@@ -628,18 +658,27 @@
 
         .eh-peek-meta {
             display: flex;
-            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px 12px;
             color: #a0a0a0;
             font-size: 11px;
             margin-bottom: 8px;
             border-bottom: 1px solid #4f535b;
             padding-bottom: 6px;
-            height: 16px;
             box-sizing: border-box;
+        }
+
+        .eh-peek-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            white-space: nowrap;
         }
 
         .eh-peek-meta span b {
             color: #58d68d;
+            font-weight: bold;
         }
 
         .eh-peek-grid {
@@ -906,7 +945,7 @@
         let top = clientY + pad;
 
         const w = expectedWidth || popup.offsetWidth || 470;
-        const h = expectedHeight || popup.offsetHeight || 376;
+        const h = expectedHeight || popup.offsetHeight || 380;
 
         if (left + w > window.innerWidth - 12) {
             left = clientX - w - pad;
@@ -966,7 +1005,6 @@
         const gdt = document.querySelector('#gdt');
         if (!gdt) return;
         const openInNewTab = getSetting('eh_open_in_new_tab', true);
-        const hoverPreviewEnabled = getSetting('eh_hover_preview', true);
 
         const bar = document.createElement('div');
         bar.id = 'eh-top-control-bar';
@@ -978,10 +1016,9 @@
                     <input type="checkbox" id="eh-setting-new-tab" ${openInNewTab ? 'checked' : ''}>
                     <span>Open in new tab</span>
                 </label>
-                <label class="eh-checkbox-label" title="Show live animated image preview when hovering over thumbnails">
-                    <input type="checkbox" id="eh-setting-hover-preview" ${hoverPreviewEnabled ? 'checked' : ''}>
-                    <span>🔍 Live Preview</span>
-                </label>
+                <div class="eh-hint-badge" title="Hold Ctrl and hover over any thumbnail to preview full animated image">
+                    <kbd>Ctrl</kbd> + Hover = 🔍 Preview
+                </div>
                 <div id="eh-saved-stats" class="eh-saved-count-badge" style="display:none;">
                     Saved: <b>0</b> pages
                 </div>
@@ -990,7 +1027,7 @@
                     <span id="eh-quota-timer" class="eh-timer-badge">⏱ 60s</span>
                 </div>
             </div>
-            <div class="eh-top-right">ExH Downloader v13.1</div>
+            <div class="eh-top-right">ExH Downloader v13.3</div>
         `;
         gdt.parentNode.insertBefore(bar, gdt);
 
@@ -1002,11 +1039,6 @@
         cb.addEventListener('change', e => {
             setSetting('eh_open_in_new_tab', e.target.checked);
             applyNewTabBehavior(e.target.checked);
-        });
-
-        const hpCb = bar.querySelector('#eh-setting-hover-preview');
-        hpCb.addEventListener('change', e => {
-            setSetting('eh_hover_preview', e.target.checked);
         });
 
         applyNewTabBehavior(openInNewTab);
@@ -1084,10 +1116,11 @@
         }
     }
 
-    // === Gallery Hover Live Image Preview ===
+    // === Gallery Ctrl+Hover Live Image Preview ===
     let previewPopupEl = null;
     let previewHoverTimeout = null;
     let activePreviewReq = null;
+    let hoveredThumbInfo = null;
 
     function initGalleryImagePreview() {
         previewPopupEl = document.createElement('div');
@@ -1109,35 +1142,68 @@
             const pageNum = m ? m[2] : '1';
 
             link.addEventListener('mouseenter', (e) => {
-                if (!getSetting('eh_hover_preview', true)) return;
-
-                clearTimeout(previewHoverTimeout);
-                previewHoverTimeout = setTimeout(() => {
-                    showImagePreview(href, pageNum, e.clientX, e.clientY);
-                }, 100);
+                hoveredThumbInfo = { href, pageNum, x: e.clientX, y: e.clientY };
+                if (e.ctrlKey) {
+                    triggerPreview();
+                }
             });
 
             link.addEventListener('mousemove', (e) => {
-                if (previewPopupEl.style.display === 'flex') {
-                    const w = previewPopupEl.offsetWidth || 260;
-                    const h = previewPopupEl.offsetHeight || 340;
-                    positionPopupAtCursor(previewPopupEl, e.clientX, e.clientY, w, h);
+                if (hoveredThumbInfo) {
+                    hoveredThumbInfo.x = e.clientX;
+                    hoveredThumbInfo.y = e.clientY;
+                }
+                if (e.ctrlKey) {
+                    if (previewPopupEl.style.display !== 'flex') {
+                        triggerPreview();
+                    } else {
+                        const w = previewPopupEl.offsetWidth || 260;
+                        const h = previewPopupEl.offsetHeight || 340;
+                        positionPopupAtCursor(previewPopupEl, e.clientX, e.clientY, w, h);
+                    }
+                } else if (previewPopupEl.style.display === 'flex') {
+                    hidePreview();
                 }
             });
 
             link.addEventListener('mouseleave', () => {
-                clearTimeout(previewHoverTimeout);
-                if (activePreviewReq && typeof activePreviewReq.abort === 'function') {
-                    try { activePreviewReq.abort(); } catch(e) {}
-                }
-                activePreviewReq = null;
-                previewPopupEl.style.display = 'none';
-                previewPopupEl.classList.remove('loaded');
-                imgEl.classList.remove('img-ready');
-                imgEl.src = '';
-                spinEl.style.display = 'flex';
+                hoveredThumbInfo = null;
+                hidePreview();
             });
         });
+
+        window.addEventListener('keydown', (e) => {
+            if ((e.key === 'Control' || e.ctrlKey) && hoveredThumbInfo && previewPopupEl.style.display !== 'flex') {
+                triggerPreview();
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (e.key === 'Control' || !e.ctrlKey) {
+                if (previewPopupEl.style.display === 'flex') {
+                    hidePreview();
+                }
+            }
+        });
+
+        function triggerPreview() {
+            if (!hoveredThumbInfo) return;
+            clearTimeout(previewHoverTimeout);
+            showImagePreview(hoveredThumbInfo.href, hoveredThumbInfo.pageNum, hoveredThumbInfo.x, hoveredThumbInfo.y);
+        }
+
+        function hidePreview() {
+            clearTimeout(previewHoverTimeout);
+            if (activePreviewReq && typeof activePreviewReq.abort === 'function') {
+                try { activePreviewReq.abort(); } catch(e) {}
+            }
+            activePreviewReq = null;
+            previewPopupEl.style.display = 'none';
+            previewPopupEl.classList.remove('loaded');
+            imgEl.classList.remove('img-ready');
+            imgEl.src = '';
+            spinEl.style.display = 'flex';
+        }
 
         function showImagePreview(viewerUrl, pageNum, clientX, clientY) {
             previewPopupEl.style.display = 'flex';
@@ -1553,7 +1619,7 @@
             const prevA = document.querySelector('a#prev');
             const nextA = document.querySelector('a#next');
 
-            pageInfo.innerText = `Page ${currentPage} / ${totalPages} • ExH Downloader v13.1`;
+            pageInfo.innerText = `Page ${currentPage} / ${totalPages} • ExH Downloader v13.3`;
 
             prevBtn.classList.toggle('disabled', currentPage <= 1);
             prevBtn.href = prevA ? prevA.href : '#';
@@ -1748,7 +1814,7 @@
         peekPopupEl.id = 'eh-gallery-peek-popup';
         peekPopupEl.innerHTML = `
             <div id="eh-peek-title" class="eh-peek-header">Loading gallery...</div>
-            <div id="eh-peek-meta" class="eh-peek-meta"><span>Fetching thumbnails...</span></div>
+            <div id="eh-peek-meta" class="eh-peek-meta"><span>Fetching info...</span></div>
             <div id="eh-peek-grid" class="eh-peek-grid">
                 ${Array(8).fill('<div class="eh-peek-thumb skeleton"></div>').join('')}
             </div>
@@ -1779,7 +1845,7 @@
 
             link.addEventListener('mousemove', (e) => {
                 if (peekPopupEl.style.display === 'block') {
-                    positionPopupAtCursor(peekPopupEl, e.clientX, e.clientY, 470, 376);
+                    positionPopupAtCursor(peekPopupEl, e.clientX, e.clientY, 470, 380);
                 }
             });
 
@@ -1795,11 +1861,11 @@
 
         function showGalleryPeek(url, clientX, clientY) {
             titleEl.innerText = 'Loading gallery...';
-            metaEl.innerHTML = '<span>Fetching thumbnails...</span>';
+            metaEl.innerHTML = '<span>Fetching info...</span>';
             gridEl.innerHTML = Array(8).fill('<div class="eh-peek-thumb skeleton"></div>').join('');
             peekPopupEl.style.display = 'block';
 
-            positionPopupAtCursor(peekPopupEl, clientX, clientY, 470, 376);
+            positionPopupAtCursor(peekPopupEl, clientX, clientY, 470, 380);
 
             if (galleryPeekCache.has(url)) {
                 const data = galleryPeekCache.get(url);
@@ -1817,11 +1883,22 @@
                         const titleJp = doc.querySelector('#gj')?.textContent || '';
                         const title = titleEn || titleJp || 'ExHentai Gallery';
 
-                        const lengthRow = Array.from(doc.querySelectorAll('#gdd tr')).find(tr => tr.textContent.includes('Length:'));
-                        const lengthText = lengthRow ? lengthRow.querySelector('.gdt2')?.textContent : '';
-
                         const catEl = doc.querySelector('.cs') || doc.querySelector('#gdc');
                         const category = catEl ? catEl.textContent.trim() : '';
+
+                        // Extract Uploader & Artist
+                        const uploader = doc.querySelector('#gdn a')?.textContent?.trim() || doc.querySelector('#gdn')?.textContent?.trim() || '';
+
+                        // Extract Table data (#gdd)
+                        const gddRows = Array.from(doc.querySelectorAll('#gdd tr'));
+                        const getGddVal = (label) => {
+                            const row = gddRows.find(tr => tr.textContent.includes(label));
+                            return row ? row.querySelector('.gdt2')?.textContent?.trim() : '';
+                        };
+
+                        const language = (getGddVal('Language:') || '').replace(/\s+/g, ' ').trim();
+                        const fileSize = getGddVal('File Size:');
+                        const lengthText = getGddVal('Length:');
 
                         // Extract sprite/image thumbnail info accurately from #gdt
                         const thumbNodes = Array.from(doc.querySelectorAll('#gdt .gdtm, #gdt .gdtl, #gdt > a, #gdt > div'));
@@ -1849,6 +1926,9 @@
                         const peekData = {
                             title,
                             category,
+                            uploader,
+                            language,
+                            fileSize,
                             lengthText,
                             thumbs
                         };
@@ -1866,7 +1946,10 @@
             titleEl.innerText = data.title;
             metaEl.innerHTML = `
                 <span>Category: <b>${data.category || 'Manga'}</b></span>
-                <span>Length: <b>${data.lengthText || 'Unknown'}</b></span>
+                ${data.uploader ? `<span>Uploader: <b>${data.uploader}</b></span>` : ''}
+                ${data.language ? `<span>Language: <b>${data.language}</b></span>` : ''}
+                ${data.fileSize ? `<span>Size: <b>${data.fileSize}</b></span>` : ''}
+                ${data.lengthText ? `<span>Pages: <b>${data.lengthText}</b></span>` : ''}
             `;
 
             gridEl.innerHTML = '';
@@ -1915,7 +1998,7 @@
                     <span id="eh-quota-timer" class="eh-timer-badge">⏱ 60s</span>
                 </div>
             </div>
-            <div class="eh-top-right">ExH Downloader v13.1</div>
+            <div class="eh-top-right">ExH Downloader v13.3</div>
         `;
 
         mainTable.parentNode.insertBefore(bar, mainTable);
