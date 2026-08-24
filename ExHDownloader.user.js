@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.2.0
+// @version      15.1.1
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -25,7 +25,7 @@
 (function () {
     'use strict';
 
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.1.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.1.1';
     const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
 
     // =====================================================================
