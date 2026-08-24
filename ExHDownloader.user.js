@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.1.1
+// @version      15.2.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -25,7 +25,7 @@
 (function () {
     'use strict';
 
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.1.1';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.2.0';
     const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
 
     // =====================================================================
@@ -294,17 +294,37 @@
             animation: ehShimmer 1.3s infinite linear;
             z-index: 8; pointer-events: none; border-radius: inherit;
         }
-        .eh-thumb-spinner {
+        /* Per-thumbnail state pill. Two phases are distinguished on purpose:
+           finding the image URL, and actually pulling its bytes. The old
+           build cleared the indicator after the first phase, which is why a
+           thumbnail could look finished while it was still downloading. */
+        .eh-thumb-status {
             position: absolute; bottom: 6px; left: 6px;
+            display: flex; align-items: center; gap: 4px;
             background: rgba(22, 64, 36, .94);
             border: 1px solid var(--eh-ok);
             color: var(--eh-ok-dim);
             font-size: 10px; font-weight: bold;
             padding: 2px 6px; border-radius: 2px;
-            z-index: 9; display: flex; align-items: center; gap: 4px;
+            z-index: 9;
             pointer-events: none; user-select: none;
-            box-shadow: 0 2px 6px rgba(0,0,0,.7);
+            box-shadow: 0 2px 6px rgba(0, 0, 0, .7);
+            font-variant-numeric: tabular-nums;
             animation: ehFadeScaleIn .15s ease-out;
+        }
+        .eh-thumb-status.is-probing { background: rgba(20, 45, 70, .94); border-color: #2c6ea8; color: #7fb8e6; }
+        .eh-thumb-status.is-error   { background: rgba(90, 25, 25, .95); border-color: var(--eh-danger); color: #ffb3aa; }
+
+        /* Byte-accurate progress along the bottom edge of the thumbnail. */
+        .eh-thumb-bar {
+            position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+            background: rgba(0, 0, 0, .5);
+            z-index: 9; pointer-events: none;
+        }
+        .eh-thumb-bar > i {
+            display: block; height: 100%; width: 0;
+            background: linear-gradient(90deg, #1f8a4d, var(--eh-ok));
+            transition: width .15s linear;
         }
         /* The live layer and its frozen canvas twin share one box so the
            swap between them is a pure opacity change, never a reflow. */
@@ -335,6 +355,8 @@
             box-shadow: 0 1px 3px rgba(0,0,0,.75) !important; user-select: none !important;
         }
         .eh-anim-badge.is-frozen { background: rgba(90, 95, 105, .92) !important; }
+        .eh-anim-badge.is-error  { background: rgba(150, 45, 40, .95) !important; }
+        .eh-anim-badge.is-waiting { background: rgba(70, 74, 82, .92) !important; }
 
         /* ---------- Download button placement ---------- */
         /* One attribute on <html> restyles every button at once, so changing
@@ -1398,52 +1420,73 @@
             };
         }
 
-        function renderStatus() {
+        // Download progress fires many times a second per file, and this
+        // walks every state, so coalesce it to one pass per frame.
+        const renderStatus = rafThrottle(renderStatusNow);
+
+        function renderStatusNow() {
             const p = badgeParts();
             if (!p) return;
 
             if (!totalAnimated) { p.badge.style.display = 'none'; return; }
 
-            let done = 0;
+            // "ready" now means the bytes arrived and the frame decoded, so
+            // the headline number matches what can actually animate. The bar
+            // additionally credits partial downloads, so it keeps creeping
+            // forward while a large GIF is still coming in.
+            let ready = 0;
             let errored = 0;
+            let working = 0;
+            let partial = 0;
+            let playing = 0;
             for (const st of states.values()) {
                 if (!st.isAnimated) continue;
-                if (st.status === 'ready') done++;
-                else if (st.status === 'error') { done++; errored++; }
+                if (st.status === 'ready') {
+                    ready++;
+                    if (st.playing) playing++;
+                } else if (st.status === 'error') {
+                    errored++;
+                } else if (st.status === 'probing' || st.status === 'loading') {
+                    working++;
+                    partial += st.progress || 0;
+                }
             }
 
-            const pct = Math.round((done / totalAnimated) * 100);
-            const finished = done >= totalAnimated;
-            const busyPages = Array.from(active).map(s => s.index).sort((a, b) => a - b);
+            const settled = ready + errored;
+            const pct = Math.round(((settled + partial) / totalAnimated) * 100);
+            const finished = settled >= totalAnimated;
 
             p.badge.style.display = 'inline-flex';
             p.badge.classList.toggle('is-done', finished && !pausedReason);
             p.badge.classList.toggle('is-error', !!pausedReason || (finished && errored > 0));
 
             p.icon.textContent = pausedReason ? '⚠' : finished ? '🎬' : '⏳';
-            p.icon.classList.toggle('eh-anim-spin-icon', !finished && !pausedReason && active.size > 0);
+            p.icon.classList.toggle('eh-anim-spin-icon', !finished && !pausedReason && working > 0);
 
             p.fill.style.width = pct + '%';
-            p.count.textContent = `${done} / ${totalAnimated}`;
+            p.count.textContent = `${ready} / ${totalAnimated}`;
 
             if (pausedReason) {
                 p.pages.textContent = pausedReason;
-            } else if (busyPages.length) {
-                const shown = busyPages.slice(0, 3).join(', ');
-                p.pages.textContent = `p.${shown}` + (queue.length ? ` · +${queue.length}` : '');
+            } else if (working) {
+                p.pages.textContent = `${working}↓` + (queue.length ? ` · +${queue.length}` : '');
             } else if (queue.length) {
                 p.pages.textContent = `+${queue.length} queued`;
             } else if (finished) {
-                p.pages.textContent = errored ? `${errored} failed` : 'ready';
+                p.pages.textContent = errored ? `${errored} failed` : `${playing} playing`;
             } else {
                 p.pages.textContent = '';
             }
 
             p.badge.title = pausedReason
                 ? pausedReason
-                : `${done} of ${totalAnimated} animated thumbnails loaded` +
-                  (errored ? `, ${errored} failed` : '') +
-                  (queue.length ? `, ${queue.length} waiting` : '');
+                : [
+                    `${ready} of ${totalAnimated} loaded and ready`,
+                    working ? `${working} downloading` : null,
+                    queue.length ? `${queue.length} waiting` : null,
+                    errored ? `${errored} failed` : null,
+                    `${playing} playing now (budget ${CONFIG.playBudget})`
+                  ].filter(Boolean).join(' · ');
         }
 
         // ---------- fetch queue ----------
@@ -1482,56 +1525,175 @@
             }
         }
 
-        function showFetchIndicator(st, on) {
+        /**
+         * Show one thumbnail's real phase on the thumbnail itself. A still
+         * picture must never be ambiguous: the user has to be able to tell
+         * "still downloading" from "downloaded" from "downloaded but
+         * deliberately paused to save CPU".
+         */
+        function renderThumbState(st) {
             const box = st.box;
             if (!box) return;
-            box.classList.toggle('eh-thumb-fetching', on);
-            if (on) {
-                if (!box.querySelector('.eh-thumb-spinner')) {
-                    const sp = document.createElement('div');
-                    sp.className = 'eh-thumb-spinner';
-                    sp.innerHTML = '<span class="eh-anim-spin-icon">⚙</span>Loading';
-                    box.appendChild(sp);
-                }
+
+            const busy = st.status === 'probing' || st.status === 'loading';
+            box.classList.toggle('eh-thumb-fetching', busy);
+
+            let pill = box.querySelector('.eh-thumb-status');
+            let bar = box.querySelector('.eh-thumb-bar');
+
+            if (!busy && st.status !== 'error') {
+                if (pill) pill.remove();
+                if (bar) bar.remove();
             } else {
-                const sp = box.querySelector('.eh-thumb-spinner');
-                if (sp) sp.remove();
+                if (!pill) {
+                    pill = document.createElement('div');
+                    pill.className = 'eh-thumb-status';
+                    pill.innerHTML = '<span class="eh-thumb-status-icon"></span>' +
+                                     '<span class="eh-thumb-status-text"></span>';
+                    box.appendChild(pill);
+                }
+                const icon = pill.querySelector('.eh-thumb-status-icon');
+                const text = pill.querySelector('.eh-thumb-status-text');
+
+                pill.classList.toggle('is-probing', st.status === 'probing');
+                pill.classList.toggle('is-error', st.status === 'error');
+
+                if (st.status === 'probing') {
+                    icon.className = 'eh-thumb-status-icon eh-anim-spin-icon';
+                    icon.textContent = '⚙';
+                    text.textContent = 'finding';
+                    if (bar) bar.remove();
+                } else if (st.status === 'loading') {
+                    icon.className = 'eh-thumb-status-icon';
+                    icon.textContent = '↓';
+                    const pct = Math.round((st.progress || 0) * 100);
+                    text.textContent = st.total
+                        ? `${pct}%  ${formatBytes(st.loaded || 0)}`
+                        : formatBytes(st.loaded || 0);
+                    if (!bar) {
+                        bar = document.createElement('div');
+                        bar.className = 'eh-thumb-bar';
+                        bar.innerHTML = '<i></i>';
+                        box.appendChild(bar);
+                    }
+                    bar.firstChild.style.width = pct + '%';
+                } else {
+                    icon.className = 'eh-thumb-status-icon';
+                    icon.textContent = '⚠';
+                    text.textContent = st.errorText || 'failed';
+                    if (bar) bar.remove();
+                }
+            }
+
+            // The corner badge separates "playing" from "loaded but paused".
+            if (st.badge) {
+                const frozen = st.status === 'ready' && !st.playing;
+                st.badge.classList.toggle('is-frozen', frozen);
+                st.badge.classList.toggle('is-error', st.status === 'error');
+                st.badge.classList.toggle('is-waiting', busy);
+                if (st.status === 'ready') {
+                    st.badge.textContent = st.playing ? (st.ext || 'anim').toUpperCase().slice(0, 4) : '❚❚';
+                    st.badge.title = st.playing
+                        ? `Playing · ${formatBytes(st.bytes || 0)}`
+                        : `Loaded (${formatBytes(st.bytes || 0)}) · paused to save CPU — hover to play`;
+                }
             }
         }
 
-        function dispatch(st) {
-            st.status = 'fetching';
-            st.urgent = false;   // the queue-jump only applied to the fetch
+        /**
+         * A thumbnail goes through two distinct network phases, and the slot
+         * is held for both. The previous build marked a thumbnail finished
+         * once phase one resolved, so the counter reported files that had
+         * only had their URL discovered -- the bytes were often still in
+         * flight, which is why far fewer thumbnails were animating than the
+         * badge claimed.
+         *
+         *   probing  -- fetch the /s/ page to discover the image URL
+         *   loading  -- pull the actual bytes, with real progress
+         *   ready    -- decoded and mountable
+         */
+        async function dispatch(st) {
+            st.urgent = false;
             active.add(st);
+            st.status = 'probing';
+            st.progress = 0;
+            renderThumbState(st);
             renderStatus();
-            showFetchIndicator(st, true);
 
-            loadViewerInfo(st.pageUrl)
-                .then(info => {
-                    // The resampled view is animated too and costs far less
-                    // bandwidth and quota than pulling the original.
-                    st.src = info.displayUrl || info.originalUrl;
-                    st.status = st.src ? 'ready' : 'error';
-                    if (st.src) mount(st);
-                })
-                .catch(err => {
-                    st.status = 'error';
-                    if (err && err.kind === QUOTA_HALT) {
-                        // Stop burning requests the moment limits are hit,
-                        // but keep the thumbnails that already loaded.
-                        pause('Animation paused — image limit reached');
-                        Quota.refresh({ force: true });
-                    } else if (err && err.kind !== 'abort') {
-                        console.warn('[ExHD] live thumb lookup failed', st.pageUrl, err);
-                    }
-                })
-                .finally(() => {
-                    active.delete(st);
-                    showFetchIndicator(st, false);
+            try {
+                const info = await loadViewerInfo(st.pageUrl);
+                // The resampled view is animated too and costs far less
+                // bandwidth and quota than pulling the original.
+                st.src = info.displayUrl || info.originalUrl;
+                if (!st.src) throw new EhError('parse', 'no image source');
+
+                st.status = 'loading';
+                renderThumbState(st);
+                renderStatus();
+
+                await downloadImage(st);
+                await mount(st);
+
+                st.status = 'ready';
+            } catch (err) {
+                st.status = 'error';
+                st.errorText = err && err.kind === 'timeout' ? 'timeout'
+                             : err && err.kind === QUOTA_HALT ? 'limit'
+                             : err && err.kind === 'http' ? 'HTTP ' + err.detail
+                             : 'failed';
+                if (err && err.kind === QUOTA_HALT) {
+                    // Stop burning requests the moment limits are hit,
+                    // but keep the thumbnails that already loaded.
+                    pause('Animation paused — image limit reached');
+                    Quota.refresh({ force: true });
+                } else if (err && err.kind !== 'abort') {
+                    console.warn('[ExHD] live thumb failed', st.pageUrl, err);
+                }
+            } finally {
+                st.request = null;
+                active.delete(st);
+                renderThumbState(st);
+                renderStatus();
+                updateBudget();
+                pump();
+            }
+        }
+
+        /**
+         * Pull the image through GM_xmlhttpRequest instead of assigning
+         * img.src directly. A plain <img> reports no progress at all, and the
+         * hath.network hosts that serve thumbnails send no CORS headers, so
+         * fetch() cannot read them either. Keeping the blob means a thumbnail
+         * evicted to free memory re-mounts without touching the network.
+         */
+        function downloadImage(st) {
+            if (st.objectUrl) return Promise.resolve();
+
+            const req = gmRequest({
+                url: st.src,
+                responseType: 'blob',
+                headers: { Referer: st.pageUrl },
+                timeout: 120000,
+                onprogress: p => {
+                    if (!p.lengthComputable) return;
+                    st.loaded = p.loaded;
+                    st.total = p.total;
+                    st.progress = p.total ? p.loaded / p.total : 0;
+                    renderThumbState(st);
                     renderStatus();
-                    updateBudget();
-                    pump();
-                });
+                }
+            });
+            st.request = req;
+
+            return req.then(res => {
+                if (res.status !== 200) throw new EhError('http', 'HTTP ' + res.status, res.status);
+                const blob = res.response;
+                if (isQuotaBlob(blob, res)) throw new EhError(QUOTA_HALT, 'image limit reached');
+                st.bytes = blob.size;
+                st.loaded = blob.size;
+                st.progress = 1;
+                st.objectUrl = URL.createObjectURL(blob);
+            });
         }
 
         // ---------- element lifecycle ----------
@@ -1570,14 +1732,14 @@
             return layer;
         }
 
-        /** Load and decode before showing, so a thumbnail never flashes half-painted. */
+        /** Decode before showing, so a thumbnail never flashes half-painted. */
         function mount(st) {
-            if (!enabled || !st.src || st.mounting) return Promise.resolve();
+            if (!enabled || !st.objectUrl || st.mounting) return Promise.resolve();
             ensureLayer(st);
             if (st.mounted) return Promise.resolve();
 
             st.mounting = true;
-            st.img.src = st.src;
+            st.img.src = st.objectUrl;   // already downloaded, so this is local
 
             const decoded = st.img.decode
                 ? st.img.decode()
@@ -1587,10 +1749,11 @@
                 st.mounted = true;
                 st.mounting = false;
                 st.layer.classList.add('is-shown');
+                renderThumbState(st);
                 updateBudget();
-            }).catch(() => {
+            }).catch(err => {
                 st.mounting = false;
-                st.status = 'error';
+                throw err;
             });
         }
 
@@ -1615,11 +1778,11 @@
         }
 
         function play(st) {
-            if (!st.mounted) { mount(st); return; }
+            if (!st.mounted) { mount(st).catch(() => { st.status = 'error'; }); return; }
             if (st.playing) return;
             st.playing = true;
             st.layer.classList.remove('is-frozen');
-            if (st.badge) st.badge.classList.remove('is-frozen');
+            renderThumbState(st);
         }
 
         function freeze(st) {
@@ -1628,7 +1791,7 @@
             if (!st.hasFrame) return;      // nothing to show yet; keep playing
             st.playing = false;
             st.layer.classList.add('is-frozen');
-            if (st.badge) st.badge.classList.add('is-frozen');
+            renderThumbState(st);
         }
 
         /** Release decoded animation frames while keeping the still visible. */
@@ -1730,7 +1893,10 @@
                     layer: null, img: null, canvas: null, badge: null,
                     mounted: false, mounting: false, playing: false,
                     hasFrame: false, pinned: false, urgent: false,
-                    docTop: 0, height: 1, dist: Infinity, inView: false
+                    docTop: 0, height: 1, dist: Infinity, inView: false,
+                    // download bookkeeping
+                    objectUrl: null, request: null,
+                    progress: 0, loaded: 0, total: 0, bytes: 0, errorText: null
                 });
             });
 
@@ -1775,6 +1941,16 @@
             queue.length = 0;
             active.clear();
 
+            // Drop in-flight transfers and release every blob before the
+            // states that own them go away, or the memory leaks for the
+            // lifetime of the tab.
+            for (const st of states.values()) {
+                if (st.request && st.request.abort) { try { st.request.abort(); } catch { /* done */ } }
+                if (st.objectUrl) URL.revokeObjectURL(st.objectUrl);
+                st.objectUrl = null;
+                st.request = null;
+            }
+
             window.removeEventListener('scroll', onScroll);
             window.removeEventListener('resize', onResize);
             const gdt = $('#gdt');
@@ -1783,7 +1959,7 @@
                 gdt.removeEventListener('pointerout', onPointerOut);
             }
 
-            $$('.eh-live-layer, .eh-anim-badge, .eh-thumb-spinner').forEach(el => el.remove());
+            $$('.eh-live-layer, .eh-anim-badge, .eh-thumb-status, .eh-thumb-bar').forEach(el => el.remove());
             $$('.eh-thumb-fetching').forEach(el => el.classList.remove('eh-thumb-fetching'));
 
             states.clear();
@@ -1800,11 +1976,18 @@
          * whole grid down would throw away work that cost quota to load.
          */
         function pause(reason) {
-            queue.forEach(st => { st.status = 'idle'; });
+            queue.forEach(st => { st.status = 'idle'; renderThumbState(st); });
             queue.length = 0;
             clearTimeout(pumpTimer);
             pumpTimer = null;
             if (io) { io.disconnect(); io = null; }
+
+            // Cancel transfers that are still running; finishing them would
+            // spend quota we already know we do not have.
+            for (const st of active) {
+                if (st.request && st.request.abort) { try { st.request.abort(); } catch { /* done */ } }
+            }
+
             pausedReason = reason;
             renderStatus();
         }
