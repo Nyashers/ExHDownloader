@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.2.0
+// @version      15.3.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -274,10 +274,16 @@
            animation layer -- both would anchor to the taller cell instead
            and drift down onto the page caption. The button carries a title
            of its own, hence the :not(). */
-        #gdt .gdtl, #gdt .gdtm > div, #gdt .gdtm,
-        .gt100 > a > div, .gt200 > a > div, .gt400 > a > div,
-        #gdt > a > div,
-        #gdt div[title]:not(.eh-dl-btn) {
+        /* [data-eh] marks everything this script injects. Excluding it here
+           is essential, not cosmetic: giving an overlay a tooltip sets a
+           title attribute, which would otherwise make it match this very
+           rule and be forced back to position:relative -- at specificity
+           (1,2,1), beating the overlay's own styling. That is exactly how
+           the format badge ended up stretched across the top of thumbnails. */
+        #gdt .gdtl:not([data-eh]), #gdt .gdtm > div:not([data-eh]), #gdt .gdtm:not([data-eh]),
+        .gt100 > a > div:not([data-eh]), .gt200 > a > div:not([data-eh]), .gt400 > a > div:not([data-eh]),
+        #gdt > a > div:not([data-eh]),
+        #gdt div[title]:not([data-eh]):not(.eh-dl-btn) {
             position: relative !important;
             overflow: hidden !important;
             border-radius: var(--eh-radius) !important;
@@ -294,69 +300,134 @@
             animation: ehShimmer 1.3s infinite linear;
             z-index: 8; pointer-events: none; border-radius: inherit;
         }
-        /* Per-thumbnail state pill. Two phases are distinguished on purpose:
-           finding the image URL, and actually pulling its bytes. The old
-           build cleared the indicator after the first phase, which is why a
-           thumbnail could look finished while it was still downloading. */
-        .eh-thumb-status {
-            position: absolute; bottom: 6px; left: 6px;
-            display: flex; align-items: center; gap: 4px;
-            background: rgba(22, 64, 36, .94);
-            border: 1px solid var(--eh-ok);
-            color: var(--eh-ok-dim);
-            font-size: 10px; font-weight: bold;
-            padding: 2px 6px; border-radius: 2px;
-            z-index: 9;
-            pointer-events: none; user-select: none;
-            box-shadow: 0 2px 6px rgba(0, 0, 0, .7);
+        /* ----------------------------------------------------------------
+           Overlay system.
+
+           The site styles its own thumbnail furniture with rules keyed on
+           the last child of a thumbnail box -- roughly
+              .gt200 div > div:last-child { position: relative; top: -4px }
+           Anything appended to that box becomes the last child and inherits
+           it, which is what dragged the format badge out of its corner and
+           stretched it across the top of the picture.
+
+           Two defences, both required:
+             1. every selector here is prefixed with #gdt, so ID specificity
+                beats any class/element rule the site can write;
+             2. every offset is stated explicitly -- setting only bottom and
+                right let the site's top/left leak through.
+           Indicators are also laid out as static children of one positioned
+           slot, so stray top/left declarations cannot move them at all.
+           ---------------------------------------------------------------- */
+
+        /* Indicators sit opposite the download button, whatever corner it
+           is configured to use, so the two never overlap. */
+        :root { --eh-slot-top: 5px; --eh-slot-bottom: auto; }
+        :root[data-eh-btnpos="top"],
+        :root[data-eh-btnpos="tl"],
+        :root[data-eh-btnpos="tr"] { --eh-slot-top: auto; --eh-slot-bottom: 5px; }
+
+        #gdt .eh-overlay {
+            position: absolute !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+            margin: 0 !important; padding: 0 !important;
+            border: 0 !important; background: none !important;
+            pointer-events: none !important;
+            z-index: 9 !important;
+            border-radius: inherit !important;
+            overflow: hidden !important;
+        }
+        #gdt .eh-overlay-slot {
+            position: absolute !important;
+            top: var(--eh-slot-top) !important;
+            bottom: var(--eh-slot-bottom) !important;
+            left: 5px !important; right: auto !important;
+            display: flex !important; align-items: center !important; gap: 4px !important;
+            max-width: calc(100% - 10px) !important;
+            margin: 0 !important; padding: 0 !important;
+        }
+
+        /* One chip per thumbnail, carrying the whole lifecycle. Static
+           positioning makes any inherited top/left simply inert. */
+        #gdt .eh-chip {
+            position: static !important;
+            top: auto !important; right: auto !important; bottom: auto !important; left: auto !important;
+            display: inline-flex !important; align-items: center !important; gap: 4px !important;
+            width: auto !important; height: auto !important;
+            margin: 0 !important; padding: 2px 6px !important;
+            border: 1px solid transparent !important; border-radius: 2px !important;
+            font-family: var(--eh-font) !important;
+            font-size: 10px !important; font-weight: bold !important;
+            line-height: 1 !important; letter-spacing: .3px !important;
+            white-space: nowrap !important; text-transform: none !important;
+            overflow: hidden !important; text-overflow: ellipsis !important;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, .7) !important;
+            user-select: none !important; pointer-events: none !important;
             font-variant-numeric: tabular-nums;
             animation: ehFadeScaleIn .15s ease-out;
         }
-        .eh-thumb-status.is-probing { background: rgba(20, 45, 70, .94); border-color: #2c6ea8; color: #7fb8e6; }
-        .eh-thumb-status.is-error   { background: rgba(90, 25, 25, .95); border-color: var(--eh-danger); color: #ffb3aa; }
-
-        /* Byte-accurate progress along the bottom edge of the thumbnail. */
-        .eh-thumb-bar {
-            position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
-            background: rgba(0, 0, 0, .5);
-            z-index: 9; pointer-events: none;
+        #gdt .eh-chip.is-finding,
+        #gdt .eh-chip.is-loading {
+            background: rgba(20, 45, 70, .95) !important;
+            border-color: #2c6ea8 !important; color: #8fc4ec !important;
         }
-        .eh-thumb-bar > i {
-            display: block; height: 100%; width: 0;
-            background: linear-gradient(90deg, #1f8a4d, var(--eh-ok));
+        #gdt .eh-chip.is-playing {
+            background: rgba(22, 64, 36, .95) !important;
+            border-color: #27ae60 !important; color: #7ee2a8 !important;
+        }
+        #gdt .eh-chip.is-paused {
+            background: rgba(52, 55, 62, .95) !important;
+            border-color: #6b7079 !important; color: #c6cad2 !important;
+        }
+        #gdt .eh-chip.is-error {
+            background: rgba(90, 25, 25, .96) !important;
+            border-color: var(--eh-danger) !important; color: #ffb3aa !important;
+            pointer-events: auto !important; cursor: pointer !important;
+        }
+        #gdt .eh-chip.is-error:hover { background: rgba(130, 40, 40, .96) !important; color: #fff !important; }
+        /* A settled thumbnail keeps its chip, but quietly; hovering the cell
+           brings it back to full strength. */
+        #gdt .eh-chip.is-playing, #gdt .eh-chip.is-paused { opacity: .72; transition: opacity .15s; }
+        #gdt a:hover .eh-chip, #gdt > *:hover .eh-chip { opacity: 1; }
+
+        /* Byte-accurate progress hugging the bottom edge. It sits below any
+           button position, so it never collides with one. */
+        #gdt .eh-thumb-bar {
+            position: absolute !important;
+            top: auto !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
+            width: auto !important; height: 3px !important;
+            margin: 0 !important; padding: 0 !important;
+            background: rgba(0, 0, 0, .55) !important;
+            pointer-events: none !important;
+        }
+        #gdt .eh-thumb-bar > i {
+            display: block !important; height: 100% !important; width: 0;
+            background: linear-gradient(90deg, #1f8a4d, var(--eh-ok)) !important;
             transition: width .15s linear;
         }
+
         /* The live layer and its frozen canvas twin share one box so the
            swap between them is a pure opacity change, never a reflow. */
-        .eh-live-layer {
-            position: absolute !important; inset: 0 !important;
+        #gdt .eh-live-layer {
+            position: absolute !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+            margin: 0 !important; padding: 0 !important;
             z-index: 5 !important; border-radius: inherit !important;
             pointer-events: none !important;
             opacity: 0; transition: opacity .22s ease-in;
         }
-        .eh-live-layer.is-shown { opacity: 1; }
-        .eh-live-layer > img, .eh-live-layer > canvas {
-            position: absolute; inset: 0;
-            width: 100%; height: 100%;
-            object-fit: contain;
-            border-radius: inherit;
-            background: rgba(0, 0, 0, .15);
+        #gdt .eh-live-layer.is-shown { opacity: 1; }
+        #gdt .eh-live-layer > img, #gdt .eh-live-layer > canvas {
+            position: absolute !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+            width: 100% !important; height: 100% !important;
+            margin: 0 !important;
+            object-fit: contain !important;
+            border-radius: inherit !important;
+            background: rgba(0, 0, 0, .15) !important;
         }
-        .eh-live-layer > canvas { display: none; }
-        .eh-live-layer.is-frozen > img    { visibility: hidden; }
-        .eh-live-layer.is-frozen > canvas { display: block; }
-        .eh-anim-badge {
-            position: absolute !important; bottom: 4px !important; right: 4px !important;
-            background: rgba(39, 174, 96, .92) !important; color: #fff !important;
-            font-size: 9px !important; font-weight: bold !important;
-            padding: 2px 4px !important; border-radius: 2px !important;
-            z-index: 10 !important; pointer-events: none !important;
-            line-height: 1 !important; letter-spacing: .5px !important;
-            box-shadow: 0 1px 3px rgba(0,0,0,.75) !important; user-select: none !important;
-        }
-        .eh-anim-badge.is-frozen { background: rgba(90, 95, 105, .92) !important; }
-        .eh-anim-badge.is-error  { background: rgba(150, 45, 40, .95) !important; }
-        .eh-anim-badge.is-waiting { background: rgba(70, 74, 82, .92) !important; }
+        #gdt .eh-live-layer > canvas { display: none !important; }
+        #gdt .eh-live-layer.is-frozen > img    { visibility: hidden !important; }
+        #gdt .eh-live-layer.is-frozen > canvas { display: block !important; }
 
         /* ---------- Download button placement ---------- */
         /* One attribute on <html> restyles every button at once, so changing
@@ -1329,7 +1400,9 @@
             mountBudget: 14,         // decoded <img> elements kept alive
             evictDistanceVh: 2,      // drop the <img> past this many viewports
             rootMargin: '300px 0px',
-            frozenFrameMax: 512      // cap for the still-frame canvas
+            frozenFrameMax: 512,     // cap for the still-frame canvas
+            taskTimeoutMs: 90000,    // a task holding a slot longer is stalled
+            seedDelayMs: 900         // fallback if the observer never fires
         };
 
         const STATIC_EXTS = new Set(['jpg', 'jpeg', 'png', 'bmp', 'avif', 'heic']);
@@ -1346,6 +1419,8 @@
         let galleryIsAnimated = null;
         let resizeTimer = null;
         let pinnedState = null;
+        let watchdogId = null;
+        let seedTimer = null;
 
         // ---------- gallery-level heuristics ----------
         function detectGalleryAnimated() {
@@ -1531,72 +1606,82 @@
          * "still downloading" from "downloaded" from "downloaded but
          * deliberately paused to save CPU".
          */
+        /**
+         * One chip carries the whole lifecycle of a thumbnail, so there is
+         * never a second indicator to collide with it or with the download
+         * button. Rendering is wrapped defensively: a single malformed cell
+         * must not be able to throw out of the queue's finally block and
+         * wedge the loader.
+         */
         function renderThumbState(st) {
-            const box = st.box;
-            if (!box) return;
+            try {
+                if (!st.box) return;
+                const s = st.status;
+                const busy = s === 'probing' || s === 'loading';
 
-            const busy = st.status === 'probing' || st.status === 'loading';
-            box.classList.toggle('eh-thumb-fetching', busy);
-
-            let pill = box.querySelector('.eh-thumb-status');
-            let bar = box.querySelector('.eh-thumb-bar');
-
-            if (!busy && st.status !== 'error') {
-                if (pill) pill.remove();
-                if (bar) bar.remove();
-            } else {
-                if (!pill) {
-                    pill = document.createElement('div');
-                    pill.className = 'eh-thumb-status';
-                    pill.innerHTML = '<span class="eh-thumb-status-icon"></span>' +
-                                     '<span class="eh-thumb-status-text"></span>';
-                    box.appendChild(pill);
+                if (s === 'idle' || s === 'queued') {
+                    if (st.overlay) st.overlay.remove();
+                    st.overlay = null;
+                    st.chip = null;
+                    st.bar = null;
+                    st.box.classList.remove('eh-thumb-fetching');
+                    return;
                 }
-                const icon = pill.querySelector('.eh-thumb-status-icon');
-                const text = pill.querySelector('.eh-thumb-status-text');
 
-                pill.classList.toggle('is-probing', st.status === 'probing');
-                pill.classList.toggle('is-error', st.status === 'error');
+                ensureOverlay(st);
+                st.box.classList.toggle('eh-thumb-fetching', busy);
 
-                if (st.status === 'probing') {
-                    icon.className = 'eh-thumb-status-icon eh-anim-spin-icon';
-                    icon.textContent = '⚙';
-                    text.textContent = 'finding';
-                    if (bar) bar.remove();
-                } else if (st.status === 'loading') {
-                    icon.className = 'eh-thumb-status-icon';
-                    icon.textContent = '↓';
-                    const pct = Math.round((st.progress || 0) * 100);
-                    text.textContent = st.total
-                        ? `${pct}%  ${formatBytes(st.loaded || 0)}`
-                        : formatBytes(st.loaded || 0);
-                    if (!bar) {
-                        bar = document.createElement('div');
-                        bar.className = 'eh-thumb-bar';
-                        bar.innerHTML = '<i></i>';
-                        box.appendChild(bar);
+                const ext = (st.ext || 'anim').toUpperCase().slice(0, 4);
+                const pct = Math.round((st.progress || 0) * 100);
+                let cls = 'eh-chip';
+                let text = '';
+                let title = '';
+
+                if (s === 'probing') {
+                    cls += ' is-finding';
+                    text = '⚙ finding…';
+                    title = 'Looking up the image address';
+                } else if (s === 'loading') {
+                    cls += ' is-loading';
+                    text = st.total ? `↓ ${pct}%` : `↓ ${formatBytes(st.loaded || 0)}`;
+                    title = st.total
+                        ? `Downloading ${ext} — ${formatBytes(st.loaded || 0)} of ${formatBytes(st.total)}`
+                        : `Downloading ${ext}`;
+                } else if (s === 'ready') {
+                    if (st.playing) {
+                        cls += ' is-playing';
+                        text = `▶ ${ext}`;
+                        title = `Loaded and playing · ${formatBytes(st.bytes || 0)}`;
+                    } else {
+                        cls += ' is-paused';
+                        text = `❚❚ ${ext}`;
+                        title = `Loaded (${formatBytes(st.bytes || 0)}) · paused to save CPU — hover to play`;
                     }
-                    bar.firstChild.style.width = pct + '%';
                 } else {
-                    icon.className = 'eh-thumb-status-icon';
-                    icon.textContent = '⚠';
-                    text.textContent = st.errorText || 'failed';
-                    if (bar) bar.remove();
+                    cls += ' is-error';
+                    text = `⚠ ${st.errorText || 'failed'}`;
+                    title = `${st.errorText || 'Failed'} — click to retry`;
                 }
-            }
 
-            // The corner badge separates "playing" from "loaded but paused".
-            if (st.badge) {
-                const frozen = st.status === 'ready' && !st.playing;
-                st.badge.classList.toggle('is-frozen', frozen);
-                st.badge.classList.toggle('is-error', st.status === 'error');
-                st.badge.classList.toggle('is-waiting', busy);
-                if (st.status === 'ready') {
-                    st.badge.textContent = st.playing ? (st.ext || 'anim').toUpperCase().slice(0, 4) : '❚❚';
-                    st.badge.title = st.playing
-                        ? `Playing · ${formatBytes(st.bytes || 0)}`
-                        : `Loaded (${formatBytes(st.bytes || 0)}) · paused to save CPU — hover to play`;
+                st.chip.className = cls;
+                st.chip.textContent = text;
+                st.chip.title = title;
+
+                if (s === 'loading') {
+                    if (!st.bar || !st.bar.isConnected) {
+                        st.bar = document.createElement('div');
+                        st.bar.className = 'eh-thumb-bar';
+                        st.bar.dataset.eh = '';
+                        st.bar.innerHTML = '<i></i>';
+                        st.overlay.appendChild(st.bar);
+                    }
+                    st.bar.firstChild.style.width = pct + '%';
+                } else if (st.bar) {
+                    st.bar.remove();
+                    st.bar = null;
                 }
+            } catch (err) {
+                console.warn('[ExHD] thumbnail indicator failed', err);
             }
         }
 
@@ -1614,6 +1699,7 @@
          */
         async function dispatch(st) {
             st.urgent = false;
+            st.startedAt = performance.now();
             active.add(st);
             st.status = 'probing';
             st.progress = 0;
@@ -1697,18 +1783,22 @@
         }
 
         // ---------- element lifecycle ----------
-        function ensureLayer(st) {
-            if (st.layer) return st.layer;
+        /** The grid markup differs between thumbnail sizes, so guarantee the
+         *  containing block here rather than trusting a selector to have
+         *  matched this particular layout. */
+        function ensureBoxIsContainer(st) {
+            const cs = getComputedStyle(st.box);
+            if (cs.position === 'static') st.box.style.position = 'relative';
+            if (cs.overflow === 'visible') st.box.style.overflow = 'hidden';
+        }
 
-            // The grid markup differs between thumbnail sizes, so guarantee
-            // the containing block here rather than trusting a selector to
-            // have matched this particular layout.
-            const boxStyle = getComputedStyle(st.box);
-            if (boxStyle.position === 'static') st.box.style.position = 'relative';
-            if (boxStyle.overflow === 'visible') st.box.style.overflow = 'hidden';
+        function ensureLayer(st) {
+            if (st.layer && st.layer.isConnected) return st.layer;
+            ensureBoxIsContainer(st);
 
             const layer = document.createElement('div');
             layer.className = 'eh-live-layer';
+            layer.dataset.eh = '';   // keeps the site's and our own box rules off it
 
             const img = document.createElement('img');
             img.decoding = 'async';
@@ -1721,15 +1811,57 @@
             st.layer = layer;
             st.img = img;
             st.canvas = canvas;
-
-            if (!st.box.querySelector('.eh-anim-badge')) {
-                const badge = document.createElement('div');
-                badge.className = 'eh-anim-badge';
-                badge.textContent = (st.ext || 'anim').toUpperCase().slice(0, 4);
-                st.box.appendChild(badge);
-                st.badge = badge;
-            }
             return layer;
+        }
+
+        /**
+         * All indicators live inside one positioned container. Keeping them
+         * as static children of a single slot means the site's own offset
+         * rules cannot displace them, and only this one wrapper is ever the
+         * thumbnail box's last child.
+         */
+        function ensureOverlay(st) {
+            if (st.overlay && st.overlay.isConnected) return st.overlay;
+            ensureBoxIsContainer(st);
+
+            const overlay = document.createElement('div');
+            overlay.className = 'eh-overlay';
+            overlay.dataset.eh = '';
+
+            const slot = document.createElement('div');
+            slot.className = 'eh-overlay-slot';
+            slot.dataset.eh = '';
+
+            const chip = document.createElement('div');
+            chip.className = 'eh-chip';
+            chip.dataset.eh = '';
+            chip.addEventListener('click', e => {
+                if (st.status !== 'error') return;
+                e.preventDefault();
+                e.stopPropagation();
+                retry(st);
+            });
+
+            slot.appendChild(chip);
+            overlay.appendChild(slot);
+            st.box.appendChild(overlay);
+
+            st.overlay = overlay;
+            st.chip = chip;
+            st.bar = null;
+            return overlay;
+        }
+
+        /** Put a failed thumbnail back at the head of the queue. */
+        function retry(st) {
+            if (!enabled) return;
+            st.status = 'idle';
+            st.errorText = null;
+            st.progress = 0;
+            st.loaded = 0;
+            st.total = 0;
+            renderThumbState(st);
+            enqueue(st, true);
         }
 
         /** Decode before showing, so a thumbnail never flashes half-painted. */
@@ -1881,16 +2013,24 @@
             if (!gdt || enabled) return;
             enabled = true;
 
+            // One unreadable cell must not abort the whole setup pass.
             Array.from(gdt.children).forEach((itemEl, idx) => {
-                const box = resolveThumbBox(itemEl);
-                const pageUrl = resolveLink(itemEl);
-                const { isAnimated, ext } = classify(itemEl);
+                let box, pageUrl, isAnimated = false, ext = '';
+                try {
+                    box = resolveThumbBox(itemEl);
+                    pageUrl = resolveLink(itemEl);
+                    ({ isAnimated, ext } = classify(itemEl));
+                } catch (err) {
+                    console.warn('[ExHD] skipping unreadable grid cell', idx + 1, err);
+                    return;
+                }
 
                 states.set(itemEl, {
                     index: idx + 1, element: itemEl, box, pageUrl,
                     isAnimated: isAnimated && !!pageUrl && !!box, ext,
                     status: 'idle', src: null,
-                    layer: null, img: null, canvas: null, badge: null,
+                    layer: null, img: null, canvas: null,
+                    overlay: null, chip: null, bar: null, startedAt: 0,
                     mounted: false, mounting: false, playing: false,
                     hasFrame: false, pinned: false, urgent: false,
                     docTop: 0, height: 1, dist: Infinity, inView: false,
@@ -1927,6 +2067,10 @@
             gdt.addEventListener('pointerover', onPointerOver, { passive: true });
             gdt.addEventListener('pointerout', onPointerOut, { passive: true });
 
+            startWatchdog();
+            clearTimeout(seedTimer);
+            seedTimer = setTimeout(seedIfIdle, CONFIG.seedDelayMs);
+
             updateBudget();
             renderStatus();
         }
@@ -1938,6 +2082,8 @@
             if (io) { io.disconnect(); io = null; }
             clearTimeout(pumpTimer); pumpTimer = null;
             clearTimeout(resizeTimer); resizeTimer = null;
+            clearTimeout(seedTimer); seedTimer = null;
+            clearInterval(watchdogId); watchdogId = null;
             queue.length = 0;
             active.clear();
 
@@ -1959,7 +2105,8 @@
                 gdt.removeEventListener('pointerout', onPointerOut);
             }
 
-            $$('.eh-live-layer, .eh-anim-badge, .eh-thumb-status, .eh-thumb-bar').forEach(el => el.remove());
+            $$('.eh-live-layer, .eh-overlay, .eh-anim-badge, .eh-thumb-status, .eh-thumb-bar')
+                .forEach(el => el.remove());
             $$('.eh-thumb-fetching').forEach(el => el.classList.remove('eh-thumb-fetching'));
 
             states.clear();
@@ -1990,6 +2137,53 @@
 
             pausedReason = reason;
             renderStatus();
+        }
+
+        /**
+         * A task that never settles holds a concurrency slot for good, and
+         * once both slots are held the pump can no longer dispatch anything:
+         * the whole loader looks frozen even though nothing crashed. Reclaim
+         * slots from stalled tasks so one bad file cannot stop the rest.
+         */
+        function startWatchdog() {
+            clearInterval(watchdogId);
+            watchdogId = setInterval(() => {
+                if (!enabled) return;
+                const now = performance.now();
+                let reclaimed = 0;
+                for (const st of Array.from(active)) {
+                    if (now - (st.startedAt || now) < CONFIG.taskTimeoutMs) continue;
+                    if (st.request && st.request.abort) {
+                        try { st.request.abort(); } catch { /* already finished */ }
+                    }
+                    st.status = 'error';
+                    st.errorText = 'stalled';
+                    active.delete(st);
+                    renderThumbState(st);
+                    reclaimed++;
+                }
+                if (reclaimed) {
+                    console.warn(`[ExHD] reclaimed ${reclaimed} stalled animation slot(s)`);
+                    renderStatus();
+                    pump();
+                }
+            }, 5000);
+        }
+
+        /**
+         * IntersectionObserver occasionally delivers nothing on a freshly
+         * restored page, leaving the queue empty and the grid inert. If no
+         * work has appeared shortly after enabling, seed it by hand.
+         */
+        function seedIfIdle() {
+            if (!enabled || queue.length || active.size) return;
+            const limit = window.scrollY + window.innerHeight + 200;
+            let seeded = 0;
+            for (const st of states.values()) {
+                if (!st.isAnimated || st.status !== 'idle') continue;
+                if (st.docTop < limit) { enqueue(st); seeded++; }
+            }
+            if (seeded) console.info(`[ExHD] observer was quiet; seeded ${seeded} thumbnail(s)`);
         }
 
         /** Live-apply the budget sliders without reloading the grid. */
@@ -2540,6 +2734,7 @@
                         <div class="eh-set-label">Browsing</div>
                         ${checkboxRow('eh-set-newtab', 'Open links in a new tab', pref('eh_open_in_new_tab'))}
                         ${onGallery ? '' : checkboxRow('eh-set-peek', 'Gallery peeker on hover', pref('eh_gallery_peeker'))}
+                        <div class="eh-set-note">Hold <b>Ctrl</b> and hover a thumbnail to preview the full image.</div>
                     </div>
 
                     ${onGallery ? `
@@ -2701,19 +2896,12 @@
                         title="Queue every image on this page that is not saved yet">⬇ Download page</button>
                 <button type="button" id="eh-retry-btn" class="eh-top-btn eh-btn-warn" style="display:none;">↻ Retry failed</button>
                 <button type="button" id="eh-cancel-all-btn" class="eh-top-btn eh-btn-danger" style="display:none;">✕ Cancel all</button>
-                <label class="eh-checkbox-label${openNewTab ? ' is-on' : ''}" title="Open thumbnails in a new tab">
-                    <input type="checkbox" id="eh-setting-new-tab" ${openNewTab ? 'checked' : ''}>
-                    <span>New tab</span>
-                </label>
                 <label class="eh-checkbox-label${liveThumbs ? ' is-on' : ''}"
                        title="Play animated GIF/WebP images inside the grid. Loading them counts towards your image limit.">
                     <input type="checkbox" id="eh-setting-live-thumbs" ${liveThumbs ? 'checked' : ''}>
-                    <span>🎬 Animated thumbs${animCount ? ` (${animCount})` : ''}</span>
+                    <span>🎬 Animated${animCount ? ` (${animCount})` : ''}</span>
                 </label>
                 <div id="eh-anim-status" class="eh-badge eh-anim-status-badge" style="display:none;"></div>
-                <div class="eh-badge eh-hint-badge" title="Hold Ctrl and hover a thumbnail for a full preview">
-                    <kbd>Ctrl</kbd> + hover = 🔍
-                </div>
                 <div id="eh-saved-stats" class="eh-badge eh-saved-count-badge" style="display:none;"></div>
                 <div class="eh-badge eh-quota-badge">
                     <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
@@ -2732,13 +2920,6 @@
         $('#eh-batch-dl-btn', bar).addEventListener('click', downloadAllOnPage);
         $('#eh-cancel-all-btn', bar).addEventListener('click', DownloadQueue.cancelAll);
         $('#eh-retry-btn', bar).addEventListener('click', DownloadQueue.retryAllFailed);
-
-        const newTabCb = $('#eh-setting-new-tab', bar);
-        newTabCb.addEventListener('change', e => {
-            setSetting('eh_open_in_new_tab', e.target.checked);
-            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
-            applyNewTabBehavior(e.target.checked);
-        });
 
         const liveCb = $('#eh-setting-live-thumbs', bar);
         liveCb.addEventListener('change', e => {
@@ -3422,13 +3603,9 @@
         bar.id = 'eh-top-control-bar';
         bar.innerHTML = `
             <div class="eh-top-left">
-                <label class="eh-checkbox-label${openNewTab ? ' is-on' : ''}" title="Open galleries in a new tab">
-                    <input type="checkbox" id="eh-setting-new-tab" ${openNewTab ? 'checked' : ''}>
-                    <span>New tab</span>
-                </label>
                 <label class="eh-checkbox-label${peeker ? ' is-on' : ''}" title="Show a floating gallery preview on hover">
                     <input type="checkbox" id="eh-setting-peeker" ${peeker ? 'checked' : ''}>
-                    <span>📑 Gallery peeker</span>
+                    <span>📑 Peeker</span>
                 </label>
                 <div class="eh-badge eh-quota-badge">
                     <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
@@ -3443,13 +3620,6 @@
 
         const gear = $('#eh-settings-btn', bar);
         gear.addEventListener('click', () => SettingsPanel.toggle(gear));
-
-        const newTabCb = $('#eh-setting-new-tab', bar);
-        newTabCb.addEventListener('change', e => {
-            setSetting('eh_open_in_new_tab', e.target.checked);
-            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
-            applyNewTabBehavior(e.target.checked);
-        });
 
         const peekCb = $('#eh-setting-peeker', bar);
         peekCb.addEventListener('change', e => {
