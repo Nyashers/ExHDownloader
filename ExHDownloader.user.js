@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.4.0
+// @version      15.5.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -25,7 +25,7 @@
 (function () {
     'use strict';
 
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.2.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.5.0';
     const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
 
     // =====================================================================
@@ -538,6 +538,19 @@
             font-family: var(--eh-font); cursor: pointer;
         }
         .eh-set-danger:hover { background: #822e2e; color: #fff; }
+        .eh-set-text {
+            width: 100%; box-sizing: border-box; height: var(--eh-ctl-h);
+            padding: 0 8px; background: var(--eh-panel-sunken);
+            border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            color: var(--eh-text); font-family: var(--eh-font); font-size: 12px;
+        }
+        .eh-set-text:focus { outline: 2px solid var(--eh-ok); outline-offset: 1px; }
+        .eh-set-preview {
+            font-size: 11px; color: var(--eh-ok-dim); background: var(--eh-panel-sunken);
+            border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            padding: 5px 8px; word-break: break-all; line-height: 1.4;
+        }
+        .eh-set-preview.is-bad { color: #ffb3aa; border-color: var(--eh-danger); }
 
         /* ---------- Download manager ---------- */
         #eh-dl-manager {
@@ -741,6 +754,40 @@
             background-size: 200% 100%; animation: ehShimmer 1.4s infinite linear;
         }
         .eh-peek-empty { grid-column: 1 / -1; text-align: center; color: var(--eh-text-dim); padding: 24px 0; }
+
+        /* ---------- What's-new notice ---------- */
+        #eh-whatsnew {
+            position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+            z-index: 100002; width: 440px; max-width: calc(100vw - 24px);
+            background: var(--eh-panel); border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius); box-shadow: 0 10px 34px var(--eh-shadow);
+            font-family: var(--eh-font); font-size: 12px; color: var(--eh-text);
+            animation: ehFadeScaleIn .18s cubic-bezier(.16,1,.3,1);
+        }
+        #eh-whatsnew .eh-wn-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 10px; background: var(--eh-panel-raised);
+            border-bottom: 1px solid var(--eh-line); font-weight: bold;
+        }
+        #eh-whatsnew .eh-wn-ver { color: var(--eh-ok-dim); font-weight: bold; }
+        #eh-whatsnew .eh-wn-body { padding: 9px 12px 4px; max-height: 46vh; overflow-y: auto; }
+        #eh-whatsnew h4 {
+            margin: 10px 0 4px; font-size: 11px; color: var(--eh-text-dim);
+            text-transform: uppercase; letter-spacing: .5px; font-weight: bold;
+        }
+        #eh-whatsnew h4:first-child { margin-top: 0; }
+        #eh-whatsnew ul { margin: 0 0 6px; padding-left: 16px; }
+        #eh-whatsnew li { margin: 3px 0; line-height: 1.45; }
+        #eh-whatsnew li b { color: var(--eh-ok-dim); }
+        #eh-whatsnew .eh-wn-foot {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 8px; padding: 8px 10px; border-top: 1px solid var(--eh-line);
+        }
+        #eh-whatsnew .eh-wn-older {
+            background: none; border: none; color: var(--eh-text-dim);
+            font-family: var(--eh-font); font-size: 11px; cursor: pointer; padding: 0; text-decoration: underline;
+        }
+        #eh-whatsnew .eh-wn-older:hover { color: var(--eh-text); }
     `;
 
     if (typeof GM_addStyle === 'function') {
@@ -868,7 +915,8 @@
         eh_anim_play_budget: 4,
         eh_anim_concurrency: 2,
         eh_anim_size_cap_mb: 8,
-        eh_preview_size_cap_mb: 24
+        eh_preview_size_cap_mb: 24,
+        eh_filename_template: '{title} - {num}.{ext}'
     };
 
     const pref = key => getSetting(key, DEFAULTS[key]);
@@ -976,6 +1024,34 @@
         return sanitizeFilename(src);
     }
 
+    /**
+     * Read the viewer's "page / total" counter.
+     *
+     * #i2 holds the counter and the filename line as sibling divs, and
+     * textContent glues them with no separator. On a gallery whose files are
+     * named 006.jpg that yields "6 / 129006.jpg", and a greedy \d+ happily
+     * reports 129006 pages. So never match across the whole node: prefer the
+     * child that is exactly "N / M", and otherwise scope the loose match to
+     * the counter div alone.
+     */
+    function readPageNav(root) {
+        const scope = root || document;
+        const i2 = scope.querySelector ? scope.querySelector('#i2') : null;
+        if (!i2) return null;
+
+        for (const el of i2.children) {
+            const m = (el.textContent || '').trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+            if (m) return { page: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+        }
+
+        const nav = i2.querySelector('.sn');
+        if (nav) {
+            const m = (nav.textContent || '').match(/(\d+)\s*\/\s*(\d+)/);
+            if (m) return { page: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+        }
+        return null;
+    }
+
     /** Total pages, used only to pick a sane zero-pad width. */
     function getGalleryPageCount() {
         const gdd = $$('#gdd tr').find(tr => /Length:/i.test(tr.textContent));
@@ -983,11 +1059,8 @@
             const m = gdd.textContent.match(/(\d+)\s*page/i);
             if (m) return parseInt(m[1], 10);
         }
-        const i2 = $('#i2');
-        if (i2) {
-            const m = i2.textContent.match(/(\d+)\s*\/\s*(\d+)/);
-            if (m) return parseInt(m[2], 10);
-        }
+        const nav = readPageNav();
+        if (nav) return nav.total;
         const gpc = $('.gpc');
         if (gpc) {
             const m = gpc.textContent.match(/of\s+([\d,]+)\s+images/i);
@@ -998,6 +1071,82 @@
 
     function padWidthFor(total) {
         return total > 999 ? 4 : 3;
+    }
+
+    /** "[Artist] Title (Series)" is the house convention for gallery names. */
+    function artistFromTitle(title) {
+        const m = String(title || '').match(/^\s*[\[(]\s*([^\])]+?)\s*[\])]/);
+        if (!m) return '';
+        // "[Group (Artist)]" -> prefer the artist in the inner brackets.
+        const inner = m[1].match(/\(([^)]+)\)\s*$/);
+        return sanitizeFilename(inner ? inner[1] : m[1], 60);
+    }
+
+    const FILENAME_TOKENS = ['title', 'name', 'artist', 'num', 'page', 'total', 'gid', 'res', 'orig', 'ext'];
+
+    /**
+     * Expand the user's filename template.
+     *
+     * A forward slash is kept as a real path separator, because Chrome's
+     * download attribute honours sub-directories -- that is what makes
+     * "one folder per gallery" templates work. Each segment is sanitised on
+     * its own so the separator survives, and traversal segments are dropped.
+     */
+    function buildFilename(template, vars) {
+        const ext = (vars.ext || 'jpg').toLowerCase();
+        const expanded = String(template || DEFAULTS.eh_filename_template)
+            .replace(/\{(\w+)\}/g, (whole, key) => {
+                const k = key.toLowerCase();
+                if (k === 'ext') return '';                 // appended at the end
+                if (!FILENAME_TOKENS.includes(k)) return whole;
+                const v = vars[k];
+                // Slashes inside a value must not invent new folders.
+                return v === undefined || v === null
+                    ? ''
+                    : sanitizeFilename(String(v).replace(/[/\\]/g, '_'), 80);
+            })
+            .replace(/\.\s*$/, '')
+            .trim();
+
+        // Sanitise segments without the "" -> default-name fallback, or a
+        // traversal segment would come back as a real folder called
+        // ExHentai_Gallery instead of being dropped.
+        const segments = expanded
+            .split('/')
+            .map(s => String(s).replace(/\p{Cc}/gu, '').replace(/[\\:*?"<>|]/g, '_')
+                               .replace(/\s+/g, ' ').trim().replace(/[. ]+$/, ''))
+            .filter(Boolean)
+            .map(s => (WINDOWS_RESERVED.test(s) ? '_' + s : s).slice(0, 80).replace(/[. ]+$/, ''))
+            .filter(Boolean);
+
+        if (!segments.length) return `image.${ext}`;
+
+        const last = segments.pop();
+        const stem = sanitizeFilename(last, Math.max(16, 120 - ext.length));
+        segments.push(stem);
+
+        let out = segments.join('/');
+        if (out.length > 200) out = out.slice(out.length - 200).replace(/^[^/]*\//, '');
+        return `${out}.${ext}`;
+    }
+
+    function filenameVars({ title, page, total, gid, res, origName, ext }) {
+        const pad = padWidthFor(total || 0);
+        // {title} keeps the site's full name, which already begins with the
+        // artist bracket; {name} drops it so "{artist}/{name}" reads cleanly.
+        const bare = String(title || '').replace(/^\s*[\[(][^\])]*[\])]\s*/, '').trim();
+        return {
+            title: title || 'ExHentai_Gallery',
+            name: sanitizeFilename(bare || title || 'Gallery', 100),
+            artist: artistFromTitle(title),
+            num: String(page).padStart(pad, '0'),
+            page: String(page),
+            total: String(total || ''),
+            gid: String(gid || ''),
+            res: res || '',
+            orig: origName ? origName.replace(/\.[^.]+$/, '') : '',
+            ext
+        };
     }
 
     // =====================================================================
@@ -1133,6 +1282,17 @@
         if (!m) return null;
         const e = m[1].toLowerCase();
         return e === 'jpeg' ? 'jpg' : e;
+    }
+
+    /** The source filename, for the {orig} template token. */
+    function origNameFromViewerDoc(doc) {
+        const i2 = doc.querySelector('#i2');
+        if (!i2) return null;
+        for (const el of i2.children) {
+            const m = (el.textContent || '').trim().match(/^(.+?\.[a-z0-9]{2,5})\s*::/i);
+            if (m) return m[1].trim();
+        }
+        return null;
     }
 
     /** The viewer prints the true source filename in the first line of #i2. */
@@ -1367,7 +1527,8 @@
             displayRes: shownRes ? shownRes.replace(/\s/g, '') : null,
             sizeText: sizeText || null,
             fileExt: extFromViewerDoc(doc),
-            pageCount: (i2Text.match(/\d+\s*\/\s*(\d+)/) || [])[1]
+            origName: origNameFromViewerDoc(doc),
+            pageCount: (readPageNav(doc) || {}).total || null
         };
     }
 
@@ -2679,8 +2840,15 @@
                             extFromUrl(targetUrl) ||
                             'jpg';
 
-                const pad = padWidthFor(getGalleryPageCount());
-                const filename = `${getGalleryTitle()} - ${String(pageNum).padStart(pad, '0')}.${ext}`;
+                const filename = buildFilename(pref('eh_filename_template'), filenameVars({
+                    title: getGalleryTitle(),
+                    page: pageNum,
+                    total: info.pageCount || getGalleryPageCount(),
+                    gid: galleryId,
+                    res: resLabel,
+                    origName: info.origName,
+                    ext
+                }));
                 saveBlob(blob, filename);
 
                 const sizeText = formatBytes(blob.size);
@@ -2845,7 +3013,10 @@
             panel.innerHTML = `
                 <div class="eh-set-head">
                     <span>⚙ ExH Downloader settings</span>
-                    <button type="button" class="eh-set-close" id="eh-set-close" title="Close">✕</button>
+                    <span style="display:flex;align-items:center;gap:8px;">
+                        <button type="button" class="eh-wn-older" id="eh-set-whatsnew">What's new</button>
+                        <button type="button" class="eh-set-close" id="eh-set-close" title="Close">✕</button>
+                    </span>
                 </div>
                 <div class="eh-set-body">
                     ${onGallery ? `
@@ -2884,6 +3055,26 @@
                     </div>` : ''}
 
                     <div class="eh-set-row">
+                        <div class="eh-set-label">Saved file names</div>
+                        <input type="text" id="eh-set-tpl" class="eh-set-text"
+                               value="${String(pref('eh_filename_template')).replace(/"/g, '&quot;')}"
+                               spellcheck="false">
+                        <div class="eh-set-note">
+                            Tokens: <b>{title}</b> <b>{name}</b> <b>{artist}</b> <b>{num}</b> <b>{page}</b>
+                            <b>{total}</b> <b>{gid}</b> <b>{res}</b> <b>{orig}</b> <b>{ext}</b>.
+                            <b>{num}</b> is the zero-padded page number, <b>{orig}</b> the site's own
+                            filename, <b>{name}</b> the title without its leading artist bracket.
+                            A <b>/</b> makes a sub-folder, so <b>{artist}/{name}/{num}.{ext}</b> files
+                            each gallery on its own.
+                        </div>
+                        <div class="eh-set-preview" id="eh-set-tpl-preview"></div>
+                        <button type="button" class="eh-set-danger" id="eh-set-tpl-reset"
+                                style="align-self:flex-start;background:var(--eh-panel);border-color:var(--eh-line);color:var(--eh-text-dim);">
+                            Reset to default
+                        </button>
+                    </div>
+
+                    <div class="eh-set-row">
                         <div class="eh-set-label">Download memory</div>
                         <div class="eh-set-note" id="eh-set-hist">
                             ${savedHere} page(s) remembered here · ${History.galleryCount()} gallery(ies) total
@@ -2900,6 +3091,10 @@
 
         function wire(gid) {
             $('#eh-set-close', panel).addEventListener('click', close);
+            $('#eh-set-whatsnew', panel).addEventListener('click', () => {
+                close();
+                showWhatsNew(true);
+            });
 
             const grid = $('#eh-pos-grid', panel);
             if (grid) {
@@ -2959,6 +3154,43 @@
             bindRange('eh-set-conc', 'eh_anim_concurrency', v => LiveThumbs.setConfig({ concurrency: v }));
             bindRange('eh-set-cap', 'eh_anim_size_cap_mb', () => { /* applies to the next load */ });
             bindRange('eh-set-pcap', 'eh_preview_size_cap_mb', () => { /* applies to the next preview */ });
+
+            // Live filename preview, built from the real gallery when there
+            // is one, so the sample is not a fiction.
+            const tpl = $('#eh-set-tpl', panel);
+            if (tpl) {
+                const preview = $('#eh-set-tpl-preview', panel);
+                const sampleVars = () => filenameVars({
+                    title: $('#gdt') ? getGalleryTitle() : '[Artist] Sample Gallery Title',
+                    page: 7,
+                    total: getGalleryPageCount() || 129,
+                    gid: gid || '1234567',
+                    res: '1280x1810',
+                    origName: '007.jpg',
+                    ext: 'png'
+                });
+                const refresh = () => {
+                    const value = tpl.value;
+                    const unknown = (value.match(/\{(\w+)\}/g) || [])
+                        .map(t => t.slice(1, -1).toLowerCase())
+                        .filter(t => !FILENAME_TOKENS.includes(t));
+                    const name = buildFilename(value, sampleVars());
+                    preview.textContent = unknown.length
+                        ? `Unknown token: {${unknown[0]}} — left as text · ${name}`
+                        : name;
+                    preview.classList.toggle('is-bad', unknown.length > 0);
+                };
+                tpl.addEventListener('input', () => {
+                    setSetting('eh_filename_template', tpl.value.trim() || DEFAULTS.eh_filename_template);
+                    refresh();
+                });
+                $('#eh-set-tpl-reset', panel).addEventListener('click', () => {
+                    tpl.value = DEFAULTS.eh_filename_template;
+                    setSetting('eh_filename_template', tpl.value);
+                    refresh();
+                });
+                refresh();
+            }
 
             const forget = $('#eh-set-forget', panel);
             if (forget) {
@@ -3035,6 +3267,8 @@
                         title="Queue every image on this page that is not saved yet">⬇ Download page</button>
                 <button type="button" id="eh-retry-btn" class="eh-top-btn eh-btn-warn" style="display:none;">↻ Retry failed</button>
                 <button type="button" id="eh-cancel-all-btn" class="eh-top-btn eh-btn-danger" style="display:none;">✕ Cancel all</button>
+                <button type="button" id="eh-archive-btn" class="eh-top-btn" style="display:none;"
+                        title="Open the site's own Archive Download dialog for the whole gallery">🗜 Archive</button>
                 <label class="eh-checkbox-label${liveThumbs ? ' is-on' : ''}"
                        title="Play animated GIF/WebP images inside the grid. Loading them counts towards your image limit.">
                     <input type="checkbox" id="eh-setting-live-thumbs" ${liveThumbs ? 'checked' : ''}>
@@ -3060,6 +3294,16 @@
         $('#eh-batch-dl-btn', bar).addEventListener('click', downloadAllOnPage);
         $('#eh-cancel-all-btn', bar).addEventListener('click', DownloadQueue.cancelAll);
         $('#eh-retry-btn', bar).addEventListener('click', DownloadQueue.retryAllFailed);
+
+        // The site already offers a whole-gallery archive; surface its own
+        // dialog rather than reimplementing it, and only when it exists.
+        const archiveBtn = $('#eh-archive-btn', bar);
+        const nativeArchive = $$('#gd5 a').find(a =>
+            /archiver/i.test(a.getAttribute('onclick') || '') || /archiver/i.test(a.href || ''));
+        if (nativeArchive) {
+            archiveBtn.style.display = 'inline-flex';
+            archiveBtn.addEventListener('click', () => nativeArchive.click());
+        }
 
         // A halted loader is recoverable now, so let the badge restart it.
         $('#eh-anim-status', bar).addEventListener('click', () => {
@@ -3377,12 +3621,7 @@
         Quota.start(() => downloading);
 
         function readPageState() {
-            const text = ($('#i2') || {}).textContent || '';
-            const m = text.match(/(\d+)\s*\/\s*(\d+)/);
-            return {
-                page: m ? parseInt(m[1], 10) : 1,
-                total: m ? parseInt(m[2], 10) : 1
-            };
+            return readPageNav() || { page: 1, total: 1 };
         }
 
         const syncUI = rafThrottle(() => {
@@ -3497,8 +3736,15 @@
                             extFromUrl(targetUrl) ||
                             'jpg';
 
-                const pad = padWidthFor(getGalleryPageCount());
-                saveBlob(blob, `${getGalleryTitle()} - ${String(page).padStart(pad, '0')}.${ext}`);
+                saveBlob(blob, buildFilename(pref('eh_filename_template'), filenameVars({
+                    title: getGalleryTitle(),
+                    page,
+                    total: readPageState().total || getGalleryPageCount(),
+                    gid,
+                    res: resLabel,
+                    origName: info.origName,
+                    ext
+                })));
 
                 const sizeText = formatBytes(blob.size);
                 History.mark(gid, page, { res: resLabel, size: sizeText });
@@ -3831,6 +4077,136 @@
     }
 
     // =====================================================================
+    // === WHAT'S NEW NOTICE ===============================================
+    // Shown once per version, top-centre, dismissible. The full history is
+    // kept here so the notice can also answer "what changed before this?".
+    // =====================================================================
+    const CHANGELOG = [
+        { v: '15.5.0', groups: [
+            { t: 'Fixed', items: [
+                'Page counter and file numbering on galleries whose files are named 001.jpg. The counter div and the filename div sit side by side in the page markup, and reading them together turned "6 / 129" into "6 / 129006" — which also padded saved filenames to four digits instead of three.'
+            ] },
+            { t: 'Added', items: [
+                'Custom filename template with live preview, in Settings.',
+                'Archive Download shortcut in the gallery bar.',
+                'This what\'s-new notice.'
+            ] }
+        ] },
+        { v: '15.4.0', groups: [
+            { t: 'Fixed', items: [
+                'False "image limit reached" that stopped the loader for good. The detector matched the digits 509 anywhere in an image URL, and H@H addresses contain long digit runs, so ordinary pages were condemned at random. It now matches only the real 509.gif notice.',
+                'An empty or malformed reply is treated as a transient error and retried, instead of halting everything.',
+                'A halted loader can be restarted by clicking its badge; before, only a page reload helped.'
+            ] },
+            { t: 'Added', items: [
+                'Size limit for animated thumbnails. Files heavier than the limit show their weight and load only on click, so a gallery of 60 MB animations no longer freezes the tab.',
+                'Ctrl+hover preview streams with a progress readout, aborts when the cursor leaves, and refuses files above its own limit.',
+                '"Playing at once" can now be set to 0 — nothing animates until hovered.',
+                'Large decodes run one at a time.'
+            ] }
+        ] },
+        { v: '15.3.0', groups: [
+            { t: 'Fixed', items: [
+                'Format badge stretching across the top of thumbnails. Giving the badge a tooltip added a title attribute, which made it match the script\'s own containing-block rule and be forced back into the layout flow.',
+                'Stalled downloads no longer hold a slot forever; a watchdog reclaims them.',
+                'The grid seeds itself if the intersection observer stays quiet, so animated thumbnails always start.'
+            ] },
+            { t: 'Changed', items: [
+                'One status chip per thumbnail covering the whole lifecycle: finding, downloading with progress, playing, paused, failed. Failed chips retry on click.',
+                'Indicators move to the corner opposite the download button.',
+                'Top bar trimmed; secondary options moved into Settings.'
+            ] }
+        ] },
+        { v: '15.2.0', groups: [
+            { t: 'Fixed', items: [
+                'The animation counter reported files whose address had merely been resolved, while the bytes were still in flight — which is why far fewer thumbnails animated than the badge claimed. It now counts only decoded, ready files.'
+            ] },
+            { t: 'Added', items: [
+                'Per-file download progress on each thumbnail, with a progress bar.',
+                'Thumbnails are fetched through the userscript transport, so an evicted one re-mounts without touching the network.'
+            ] }
+        ] },
+        { v: '15.1.0', groups: [
+            { t: 'Fixed', items: [
+                'Hover previews stayed frozen where they appeared: the entrance animation wrote to the same transform used to follow the cursor, and a CSS animation outranks inline styles.',
+                'The download button sat across the "Page N" caption because it was anchored to the grid cell rather than to the picture.'
+            ] },
+            { t: 'Added', items: [
+                'Settings panel behind the gear icon.',
+                'Five download-button positions, plus a reveal-on-hover mode.',
+                'Animated-thumbnail progress badge.'
+            ] }
+        ] },
+        { v: '15.0.0', groups: [
+            { t: 'Fixed', items: [
+                'Original downloads were always saved as .jpg, because /fullimg/ URLs carry no extension. The real format is now read from the file\'s magic bytes.',
+                'Limit notices could be saved as if they were images.',
+                'Scroll stutter in the grid: positions were re-measured inside a sort comparator and on every scroll event.',
+                'Frozen animations flickered between the sprite and the live image, and were never really paused.'
+            ] },
+            { t: 'Added', items: [
+                'Retries with backoff, a failure list, and per-item retry.',
+                'Draggable, collapsible download manager with speed and ETA.',
+                'Theme detection so the interface matches the site\'s colour scheme.',
+                'Automatic updates from the project repository.'
+            ] }
+        ] }
+    ];
+
+    function buildChangelogHtml(entry) {
+        return entry.groups.map(g =>
+            `<h4>${g.t}</h4><ul>${g.items.map(i => `<li>${i}</li>`).join('')}</ul>`
+        ).join('');
+    }
+
+    function showWhatsNew(force) {
+        if ($('#eh-whatsnew')) return;
+        const seen = String(getSetting('eh_seen_version', ''));
+        if (!force && seen === VERSION) return;
+
+        const current = CHANGELOG.find(c => c.v === VERSION) || CHANGELOG[0];
+        const older = CHANGELOG.filter(c => c !== current);
+
+        const box = document.createElement('div');
+        box.id = 'eh-whatsnew';
+        box.innerHTML = `
+            <div class="eh-wn-head">
+                <span>ExH Downloader — what's new <span class="eh-wn-ver">v${current.v}</span></span>
+                <button type="button" class="eh-set-close" id="eh-wn-close" title="Dismiss">✕</button>
+            </div>
+            <div class="eh-wn-body" id="eh-wn-body">${buildChangelogHtml(current)}</div>
+            <div class="eh-wn-foot">
+                <button type="button" class="eh-wn-older" id="eh-wn-older">Show earlier versions</button>
+                <button type="button" class="eh-top-btn eh-btn-go" id="eh-wn-ok">Got it</button>
+            </div>`;
+        document.body.appendChild(box);
+
+        const dismiss = () => {
+            setSetting('eh_seen_version', VERSION);
+            box.remove();
+        };
+        $('#eh-wn-close', box).addEventListener('click', dismiss);
+        $('#eh-wn-ok', box).addEventListener('click', dismiss);
+
+        const olderBtn = $('#eh-wn-older', box);
+        let expanded = false;
+        olderBtn.addEventListener('click', () => {
+            expanded = !expanded;
+            $('#eh-wn-body', box).innerHTML = expanded
+                ? buildChangelogHtml(current) +
+                  older.map(e => `<h4>v${e.v}</h4>${buildChangelogHtml(e)}`).join('')
+                : buildChangelogHtml(current);
+            olderBtn.textContent = expanded ? 'Hide earlier versions' : 'Show earlier versions';
+        });
+
+        document.addEventListener('keydown', function esc(e) {
+            if (e.key !== 'Escape') return;
+            document.removeEventListener('keydown', esc);
+            dismiss();
+        });
+    }
+
+    // =====================================================================
     // === BOOTSTRAP =======================================================
     // =====================================================================
     function bootstrap() {
@@ -3849,6 +4225,10 @@
             }
         } catch (err) {
             console.error('[ExHD] initialisation failed', err);
+        }
+        // Never on the single-image viewer: it would cover the picture.
+        if (!path.startsWith('/s/')) {
+            try { showWhatsNew(false); } catch (err) { console.warn('[ExHD] notice failed', err); }
         }
     }
 
