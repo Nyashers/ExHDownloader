@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.3.0
+// @version      15.4.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -384,6 +384,12 @@
             pointer-events: auto !important; cursor: pointer !important;
         }
         #gdt .eh-chip.is-error:hover { background: rgba(130, 40, 40, .96) !important; color: #fff !important; }
+        #gdt .eh-chip.is-oversize {
+            background: rgba(74, 51, 18, .96) !important;
+            border-color: #7a5a20 !important; color: #e8c98a !important;
+            pointer-events: auto !important; cursor: pointer !important;
+        }
+        #gdt .eh-chip.is-oversize:hover { background: rgba(99, 67, 15, .96) !important; color: #fff !important; }
         /* A settled thumbnail keeps its chip, but quietly; hovering the cell
            brings it back to full strength. */
         #gdt .eh-chip.is-playing, #gdt .eh-chip.is-paused { opacity: .72; transition: opacity .15s; }
@@ -467,6 +473,8 @@
         }
         .eh-anim-status-badge.is-done .eh-anim-count { color: var(--eh-text); }
         .eh-anim-status-badge.is-error { border-color: var(--eh-danger); background: rgba(90,25,25,.5); color: #ffb3aa; }
+        .eh-anim-status-badge.is-paused { cursor: pointer; border-color: var(--eh-warn); background: rgba(74,51,18,.6); color: #e8c98a; }
+        .eh-anim-status-badge.is-paused:hover { background: rgba(99,67,15,.75); color: #fff; }
 
         /* ---------- Settings panel ---------- */
         #eh-settings-panel {
@@ -858,7 +866,9 @@
         eh_btn_pos: 'bottom',
         eh_btn_hover: false,
         eh_anim_play_budget: 4,
-        eh_anim_concurrency: 2
+        eh_anim_concurrency: 2,
+        eh_anim_size_cap_mb: 8,
+        eh_preview_size_cap_mb: 24
     };
 
     const pref = key => getSetting(key, DEFAULTS[key]);
@@ -1004,6 +1014,7 @@
     }
 
     const QUOTA_HALT = 'quota';
+    const OVERSIZE = 'oversize';
 
     function gmRequest(opts) {
         let handle = null;
@@ -1053,7 +1064,14 @@
         throw lastErr;
     }
 
-    const QUOTA_TEXT = /(exceeded your image viewing limits|bandwidth exceeded|509)/i;
+    /**
+     * The bandwidth notice is served as an image literally named 509.gif.
+     * Match that filename and nothing else: H@H URLs carry long digit runs
+     * in their hash and port, so a bare "509" substring test condemns
+     * perfectly good images. That false positive used to halt the whole
+     * loader on any page whose URL happened to contain those three digits.
+     */
+    const QUOTA_SENTINEL_URL = /\/509s?\.(?:gif|png|jpe?g)(?:[?#]|$)/i;
 
     /** Fetch and parse an HTML document, detecting the quota interstitial. */
     async function fetchDocument(url, opts = {}) {
@@ -1127,12 +1145,32 @@
         return m ? m[1].toLowerCase().replace(/^jpeg$/, 'jpg') : null;
     }
 
-    function isQuotaBlob(blob, res) {
-        if (!blob || blob.size === 0) return true;
+    /**
+     * Separate a real limit notice from an ordinary failure. Only the first
+     * deserves halting everything; an empty or malformed reply is transient
+     * and should simply be retried.
+     */
+    function classifyImageResponse(blob, res) {
+        if (res.status === 509) return 'quota';
+        if (QUOTA_SENTINEL_URL.test(res.finalUrl || '')) return 'quota';
+        if (!blob) return 'empty';
         const type = (blob.type || '').toLowerCase();
-        if (type.startsWith('text/') || type === 'application/xhtml+xml') return true;
-        if (QUOTA_TEXT.test(res.finalUrl || '')) return true;
-        return false;
+        if (type.startsWith('text/') || type === 'application/xhtml+xml') return 'html';
+        if (blob.size === 0) return 'empty';
+        return 'ok';
+    }
+
+    function assertRealImage(blob, res) {
+        switch (classifyImageResponse(blob, res)) {
+            case 'quota':
+                throw new EhError(QUOTA_HALT, 'Image / bandwidth limit reached');
+            case 'html':
+                throw new EhError('http', 'Server returned a page instead of an image');
+            case 'empty':
+                throw new EhError('network', 'Empty response');
+            default:
+                return true;
+        }
     }
 
     /** Download bytes, verifying we actually received an image. */
@@ -1151,9 +1189,7 @@
         if (res.status !== 200) throw new EhError('http', `HTTP ${res.status}`, res.status);
 
         const blob = res.response;
-        if (isQuotaBlob(blob, res)) {
-            throw new EhError(QUOTA_HALT, 'Server returned a limit notice instead of the image');
-        }
+        assertRealImage(blob, res);
         return { blob, res };
     }
 
@@ -1422,6 +1458,24 @@
         let watchdogId = null;
         let seedTimer = null;
 
+        /** 0 disables the cap entirely. */
+        function sizeCapBytes() {
+            const mb = clamp(pref('eh_anim_size_cap_mb'), 0, 512);
+            return mb > 0 ? mb * 1024 * 1024 : 0;
+        }
+
+        /**
+         * Decoding a large animated WebP blocks the main thread, so never let
+         * two run at once. Galleries of 60 MB HD animations froze the tab
+         * outright before this existed.
+         */
+        let decodeChain = Promise.resolve();
+        function queueDecode(fn) {
+            const run = decodeChain.then(fn, fn);
+            decodeChain = run.catch(() => {});
+            return run;
+        }
+
         // ---------- gallery-level heuristics ----------
         function detectGalleryAnimated() {
             if (galleryIsAnimated !== null) return galleryIsAnimated;
@@ -1514,6 +1568,7 @@
             let working = 0;
             let partial = 0;
             let playing = 0;
+            let oversize = 0;
             for (const st of states.values()) {
                 if (!st.isAnimated) continue;
                 if (st.status === 'ready') {
@@ -1521,19 +1576,22 @@
                     if (st.playing) playing++;
                 } else if (st.status === 'error') {
                     errored++;
+                } else if (st.status === 'oversize') {
+                    oversize++;
                 } else if (st.status === 'probing' || st.status === 'loading') {
                     working++;
                     partial += st.progress || 0;
                 }
             }
 
-            const settled = ready + errored;
+            const settled = ready + errored + oversize;
             const pct = Math.round(((settled + partial) / totalAnimated) * 100);
             const finished = settled >= totalAnimated;
 
             p.badge.style.display = 'inline-flex';
             p.badge.classList.toggle('is-done', finished && !pausedReason);
-            p.badge.classList.toggle('is-error', !!pausedReason || (finished && errored > 0));
+            p.badge.classList.toggle('is-paused', !!pausedReason);
+            p.badge.classList.toggle('is-error', !pausedReason && finished && errored > 0);
 
             p.icon.textContent = pausedReason ? '⚠' : finished ? '🎬' : '⏳';
             p.icon.classList.toggle('eh-anim-spin-icon', !finished && !pausedReason && working > 0);
@@ -1548,19 +1606,24 @@
             } else if (queue.length) {
                 p.pages.textContent = `+${queue.length} queued`;
             } else if (finished) {
-                p.pages.textContent = errored ? `${errored} failed` : `${playing} playing`;
+                p.pages.textContent = errored ? `${errored} failed`
+                                    : oversize ? `${oversize} too big`
+                                    : `${playing} playing`;
             } else {
                 p.pages.textContent = '';
             }
 
             p.badge.title = pausedReason
-                ? pausedReason
+                ? pausedReason + ' — click to resume'
                 : [
                     `${ready} of ${totalAnimated} loaded and ready`,
                     working ? `${working} downloading` : null,
                     queue.length ? `${queue.length} waiting` : null,
+                    oversize ? `${oversize} above the size limit (click one to load it)` : null,
                     errored ? `${errored} failed` : null,
-                    `${playing} playing now (budget ${CONFIG.playBudget})`
+                    CONFIG.playBudget === 0
+                        ? `${playing} playing (hover-only mode)`
+                        : `${playing} playing now (budget ${CONFIG.playBudget})`
                   ].filter(Boolean).join(' · ');
         }
 
@@ -1657,6 +1720,11 @@
                         text = `❚❚ ${ext}`;
                         title = `Loaded (${formatBytes(st.bytes || 0)}) · paused to save CPU — hover to play`;
                     }
+                } else if (s === 'oversize') {
+                    cls += ' is-oversize';
+                    text = `▶ ${formatBytes(st.bytes || 0)}`;
+                    title = `${formatBytes(st.bytes || 0)} — above the auto-load limit. ` +
+                            'Click to load this one anyway.';
                 } else {
                     cls += ' is-error';
                     text = `⚠ ${st.errorText || 'failed'}`;
@@ -1722,6 +1790,13 @@
 
                 st.status = 'ready';
             } catch (err) {
+                if (err && err.kind === OVERSIZE) {
+                    // Not a failure: the file is simply too heavy to play
+                    // automatically. Offer it instead of forcing it.
+                    st.status = 'oversize';
+                    st.errorText = null;
+                    return;
+                }
                 st.status = 'error';
                 st.errorText = err && err.kind === 'timeout' ? 'timeout'
                              : err && err.kind === QUOTA_HALT ? 'limit'
@@ -1755,6 +1830,9 @@
         function downloadImage(st) {
             if (st.objectUrl) return Promise.resolve();
 
+            const cap = sizeCapBytes();
+            let refused = false;
+
             const req = gmRequest({
                 url: st.src,
                 responseType: 'blob',
@@ -1762,6 +1840,15 @@
                 timeout: 120000,
                 onprogress: p => {
                     if (!p.lengthComputable) return;
+                    // Content-Length arrives with the first progress tick, so
+                    // an oversized file costs a few KB rather than freezing the
+                    // tab on a multi-hundred-megabyte animated decode.
+                    if (cap && p.total > cap && !st.forced) {
+                        refused = true;
+                        st.bytes = p.total;
+                        try { req.abort(); } catch { /* already settled */ }
+                        return;
+                    }
                     st.loaded = p.loaded;
                     st.total = p.total;
                     st.progress = p.total ? p.loaded / p.total : 0;
@@ -1774,11 +1861,18 @@
             return req.then(res => {
                 if (res.status !== 200) throw new EhError('http', 'HTTP ' + res.status, res.status);
                 const blob = res.response;
-                if (isQuotaBlob(blob, res)) throw new EhError(QUOTA_HALT, 'image limit reached');
+                assertRealImage(blob, res);
+                if (cap && !st.forced && blob.size > cap) {
+                    st.bytes = blob.size;
+                    throw new EhError(OVERSIZE, 'too large');
+                }
                 st.bytes = blob.size;
                 st.loaded = blob.size;
                 st.progress = 1;
                 st.objectUrl = URL.createObjectURL(blob);
+            }, err => {
+                if (refused) throw new EhError(OVERSIZE, 'too large');
+                throw err;
             });
         }
 
@@ -1836,9 +1930,12 @@
             chip.className = 'eh-chip';
             chip.dataset.eh = '';
             chip.addEventListener('click', e => {
-                if (st.status !== 'error') return;
+                if (st.status !== 'error' && st.status !== 'oversize') return;
                 e.preventDefault();
                 e.stopPropagation();
+                // Clicking an oversized thumbnail is explicit consent to pay
+                // the decode cost for that one file.
+                if (st.status === 'oversize') st.forced = true;
                 retry(st);
             });
 
@@ -1873,9 +1970,10 @@
             st.mounting = true;
             st.img.src = st.objectUrl;   // already downloaded, so this is local
 
-            const decoded = st.img.decode
+            // Serialised: two big animated decodes at once lock up the tab.
+            const decoded = queueDecode(() => (st.img.decode
                 ? st.img.decode()
-                : new Promise((res, rej) => { st.img.onload = res; st.img.onerror = rej; });
+                : new Promise((res, rej) => { st.img.onload = res; st.img.onerror = rej; })));
 
             return decoded.then(() => {
                 st.mounted = true;
@@ -1972,6 +2070,16 @@
             }
         });
 
+        /** Named so that resume() can re-attach the same observer callback. */
+        function onIntersect(entries) {
+            for (const entry of entries) {
+                const st = states.get(entry.target);
+                if (!st || !st.isAnimated) continue;
+                if (entry.isIntersecting && st.status === 'idle') enqueue(st);
+            }
+            updateBudget();
+        }
+
         const onScroll = () => updateBudget();
 
         function onResize() {
@@ -2035,7 +2143,7 @@
                     hasFrame: false, pinned: false, urgent: false,
                     docTop: 0, height: 1, dist: Infinity, inView: false,
                     // download bookkeeping
-                    objectUrl: null, request: null,
+                    objectUrl: null, request: null, forced: false,
                     progress: 0, loaded: 0, total: 0, bytes: 0, errorText: null
                 });
             });
@@ -2044,19 +2152,13 @@
             for (const st of states.values()) if (st.isAnimated) totalAnimated++;
             pausedReason = null;
 
-            CONFIG.playBudget = clamp(pref('eh_anim_play_budget'), 1, 12);
+            CONFIG.playBudget = clamp(pref('eh_anim_play_budget'), 0, 12);
             CONFIG.maxConcurrentFetch = clamp(pref('eh_anim_concurrency'), 1, 4);
 
             measureLayout();
 
-            io = new IntersectionObserver(entries => {
-                for (const entry of entries) {
-                    const st = states.get(entry.target);
-                    if (!st || !st.isAnimated) continue;
-                    if (entry.isIntersecting && st.status === 'idle') enqueue(st);
-                }
-                updateBudget();
-            }, { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
+            io = new IntersectionObserver(onIntersect,
+                { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
 
             for (const st of states.values()) {
                 if (st.isAnimated) io.observe(st.element);
@@ -2140,6 +2242,34 @@
         }
 
         /**
+         * Pausing used to be terminal: the observer was gone and nothing
+         * could ever restart it short of reloading the page. A halt caused by
+         * a transient limit must be recoverable.
+         */
+        function resume() {
+            if (!enabled || !pausedReason) return;
+            pausedReason = null;
+
+            for (const st of states.values()) {
+                if (st.status === 'error' && st.errorText === 'limit') {
+                    st.status = 'idle';
+                    st.errorText = null;
+                    renderThumbState(st);
+                }
+            }
+
+            if (!io) {
+                io = new IntersectionObserver(onIntersect,
+                    { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
+                for (const st of states.values()) if (st.isAnimated) io.observe(st.element);
+            }
+
+            seedIfIdle();
+            renderStatus();
+            pump();
+        }
+
+        /**
          * A task that never settles holds a concurrency slot for good, and
          * once both slots are held the pump can no longer dispatch anything:
          * the whole loader looks frozen even though nothing crashed. Reclaim
@@ -2188,7 +2318,7 @@
 
         /** Live-apply the budget sliders without reloading the grid. */
         function setConfig({ playBudget, concurrency }) {
-            if (playBudget != null) CONFIG.playBudget = clamp(playBudget, 1, 12);
+            if (playBudget != null) CONFIG.playBudget = clamp(playBudget, 0, 12);
             if (concurrency != null) CONFIG.maxConcurrentFetch = clamp(concurrency, 1, 4);
             if (enabled) { updateBudget(); pump(); }
         }
@@ -2202,8 +2332,9 @@
         }
 
         return {
-            enable, disable, setConfig, countAnimatedCandidates,
-            get isEnabled() { return enabled; }
+            enable, disable, setConfig, resume, countAnimatedCandidates,
+            get isEnabled() { return enabled; },
+            get isPaused() { return !!pausedReason; }
         };
     })();
     // =====================================================================
@@ -2740,10 +2871,16 @@
                     ${onGallery ? `
                     <div class="eh-set-row">
                         <div class="eh-set-label">Animated thumbnails</div>
-                        ${rangeRow('eh-set-play', 'Playing at once', pref('eh_anim_play_budget'), 1, 12)}
+                        ${rangeRow('eh-set-play', 'Playing at once', pref('eh_anim_play_budget'), 0, 12)}
                         ${rangeRow('eh-set-conc', 'Parallel lookups', pref('eh_anim_concurrency'), 1, 4)}
-                        <div class="eh-set-note">Fewer playing at once means less CPU and GPU load.
-                        Loading these images spends your image limit, so keep parallel lookups low.</div>
+                        ${rangeRow('eh-set-cap', 'Auto-load up to, MB', pref('eh_anim_size_cap_mb'), 0, 64)}
+                        ${rangeRow('eh-set-pcap', 'Ctrl+hover preview up to, MB', pref('eh_preview_size_cap_mb'), 0, 128)}
+                        <div class="eh-set-note">
+                            Playing <b>0</b> means nothing animates on its own — only the thumbnail
+                            under the cursor plays. Heavier files than the size limit show their
+                            weight and load only when clicked; <b>0</b> lifts the limit.
+                            Loading these images spends your image limit.
+                        </div>
                     </div>` : ''}
 
                     <div class="eh-set-row">
@@ -2820,6 +2957,8 @@
             };
             bindRange('eh-set-play', 'eh_anim_play_budget', v => LiveThumbs.setConfig({ playBudget: v }));
             bindRange('eh-set-conc', 'eh_anim_concurrency', v => LiveThumbs.setConfig({ concurrency: v }));
+            bindRange('eh-set-cap', 'eh_anim_size_cap_mb', () => { /* applies to the next load */ });
+            bindRange('eh-set-pcap', 'eh_preview_size_cap_mb', () => { /* applies to the next preview */ });
 
             const forget = $('#eh-set-forget', panel);
             if (forget) {
@@ -2901,7 +3040,8 @@
                     <input type="checkbox" id="eh-setting-live-thumbs" ${liveThumbs ? 'checked' : ''}>
                     <span>🎬 Animated${animCount ? ` (${animCount})` : ''}</span>
                 </label>
-                <div id="eh-anim-status" class="eh-badge eh-anim-status-badge" style="display:none;"></div>
+                <div id="eh-anim-status" class="eh-badge eh-anim-status-badge" style="display:none;"
+                     title="Animated thumbnail progress"></div>
                 <div id="eh-saved-stats" class="eh-badge eh-saved-count-badge" style="display:none;"></div>
                 <div class="eh-badge eh-quota-badge">
                     <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
@@ -2920,6 +3060,11 @@
         $('#eh-batch-dl-btn', bar).addEventListener('click', downloadAllOnPage);
         $('#eh-cancel-all-btn', bar).addEventListener('click', DownloadQueue.cancelAll);
         $('#eh-retry-btn', bar).addEventListener('click', DownloadQueue.retryAllFailed);
+
+        // A halted loader is recoverable now, so let the badge restart it.
+        $('#eh-anim-status', bar).addEventListener('click', () => {
+            if (LiveThumbs.isPaused) LiveThumbs.resume();
+        });
 
         const liveCb = $('#eh-setting-live-thumbs', bar);
         liveCb.addEventListener('change', e => {
@@ -3036,6 +3181,14 @@
         let cursor = { x: 0, y: 0 };
         let openFor = null;
         let loadToken = 0;
+        let activePreviewReq = null;
+        let previewObjectUrl = null;
+
+        function revokePreviewUrl() {
+            if (!previewObjectUrl) return;
+            URL.revokeObjectURL(previewObjectUrl);
+            previewObjectUrl = null;
+        }
 
         function fitStage(resText) {
             const m = String(resText || '').match(/(\d+)x(\d+)/i);
@@ -3054,20 +3207,29 @@
         function close() {
             openFor = null;
             loadToken++;
+            // Stop the transfer as soon as the cursor leaves; otherwise a
+            // heavy file keeps streaming for a preview nobody is looking at.
+            if (activePreviewReq && activePreviewReq.abort) {
+                try { activePreviewReq.abort(); } catch { /* already settled */ }
+            }
+            activePreviewReq = null;
             popup.classList.remove('is-open');
             imgEl.classList.remove('img-ready');
             imgEl.removeAttribute('src');
+            revokePreviewUrl();
             stage.classList.add('is-skeleton');
+            spinEl.textContent = '⟳ loading…';
             spinEl.style.display = 'flex';
         }
 
-        function show(info, pageNum) {
+        function show(info, pageNum, byteSize) {
             spinEl.style.display = 'none';
             stage.classList.remove('is-skeleton');
             imgEl.classList.add('img-ready');
             const bits = [`Page ${pageNum}`];
             if (info.displayRes) bits.push(info.displayRes);
-            if (info.sizeText) bits.push(info.sizeText);
+            const size = byteSize ? formatBytes(byteSize) : info.sizeText;
+            if (size) bits.push(size);
             capEl.innerHTML = bits.map((b, i) => (i ? `<b>${b}</b>` : b)).join(' · ');
         }
 
@@ -3094,10 +3256,46 @@
                 if (!src) { capEl.textContent = `Page ${pageNum} — no source`; return; }
                 fitStage(info.displayRes);
                 reposition();
-                imgEl.src = src;
-                const done = () => { if (token === loadToken) show(info, pageNum); };
-                if (imgEl.decode) imgEl.decode().then(done).catch(done);
-                else imgEl.onload = done;
+
+                // Streaming this instead of assigning img.src is what keeps a
+                // 60 MB animated WebP from locking the tab: the size is known
+                // from the first progress tick, so an oversized file is
+                // refused after a few kilobytes and never decoded.
+                const capMb = clamp(pref('eh_preview_size_cap_mb'), 0, 512);
+                const cap = capMb > 0 ? capMb * 1024 * 1024 : 0;
+                let refused = false;
+
+                const req = fetchImageBlob(src, {
+                    referer: url,
+                    onHandle: r => { activePreviewReq = r; },
+                    onprogress: p => {
+                        if (token !== loadToken || !p.lengthComputable) return;
+                        if (cap && p.total > cap) {
+                            refused = true;
+                            spinEl.textContent = `⚠ ${formatBytes(p.total)} — too large to preview`;
+                            try { activePreviewReq && activePreviewReq.abort(); } catch { /* done */ }
+                            return;
+                        }
+                        spinEl.textContent =
+                            `⟳ ${Math.round((p.loaded / p.total) * 100)}%  ${formatBytes(p.loaded)} / ${formatBytes(p.total)}`;
+                    }
+                });
+
+                req.then(({ blob }) => {
+                    if (token !== loadToken) return;
+                    revokePreviewUrl();
+                    previewObjectUrl = URL.createObjectURL(blob);
+                    imgEl.src = previewObjectUrl;
+                    const done = () => { if (token === loadToken) show(info, pageNum, blob.size); };
+                    if (imgEl.decode) imgEl.decode().then(done).catch(done);
+                    else imgEl.onload = done;
+                }).catch(err => {
+                    if (token !== loadToken || refused) return;
+                    if (err && err.kind === 'abort') return;
+                    spinEl.textContent = err && err.kind === QUOTA_HALT
+                        ? '⚠ image limit reached'
+                        : '⚠ could not load';
+                });
             }).catch(err => {
                 if (token !== loadToken) return;
                 spinEl.textContent = err && err.kind === QUOTA_HALT ? '⚠ image limit reached' : '⚠ could not load';
