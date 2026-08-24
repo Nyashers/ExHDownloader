@@ -267,9 +267,17 @@
         }
 
         /* Give every thumbnail box a positioning + clipping context. */
+        /* Two boxes matter per cell: the outer wrapper, and the inner box
+           that actually paints the thumbnail. On the live site that inner
+           box is a div[title] and it is position:static, so without this it
+           would not act as a containing block for the button or the
+           animation layer -- both would anchor to the taller cell instead
+           and drift down onto the page caption. The button carries a title
+           of its own, hence the :not(). */
         #gdt .gdtl, #gdt .gdtm > div, #gdt .gdtm,
         .gt100 > a > div, .gt200 > a > div, .gt400 > a > div,
-        #gdt > a > div {
+        #gdt > a > div,
+        #gdt div[title]:not(.eh-dl-btn) {
             position: relative !important;
             overflow: hidden !important;
             border-radius: var(--eh-radius) !important;
@@ -1269,6 +1277,28 @@
     //     frozen thumbnail now shows a canvas holding its last frame, so the
     //     picture never disappears and the animated decode really does stop.
     // =====================================================================
+    /**
+     * The element that actually paints a thumbnail, across every grid layout.
+     * Verified against the live site: in the current markup this is
+     * `#gdt > a > div > div[title]`, sized to the image itself, while the
+     * surrounding cell is ~16px taller because of the "Page N" caption. The
+     * download button and the animation layer both anchor here so they sit
+     * on the image rather than across the caption.
+     *
+     * The download button carries a title of its own, so exclude it.
+     */
+    function resolveThumbBox(itemEl) {
+        const titled = itemEl.matches('[title]') && !itemEl.classList.contains('eh-dl-btn')
+            ? itemEl
+            : itemEl.querySelector('[title]:not(.eh-dl-btn)');
+        if (titled) return titled.tagName === 'IMG' ? (titled.parentElement || itemEl) : titled;
+        const bg = itemEl.querySelector('div[style*="background"]');
+        if (bg) return bg;
+        const img = itemEl.querySelector('img');
+        if (img) return img.parentElement || itemEl;
+        return itemEl.querySelector('a') || itemEl;
+    }
+
     const LiveThumbs = (() => {
         const CONFIG = {
             maxConcurrentFetch: 2,   // parallel /s/ page lookups
@@ -1322,17 +1352,6 @@
             // WebP is the ambiguous one; fall back to the gallery's own tags.
             if (ext === 'webp') return { isAnimated: detectGalleryAnimated(), ext };
             return { isAnimated: detectGalleryAnimated(), ext };
-        }
-
-        /** The element that actually paints the thumbnail, in any layout mode. */
-        function resolveThumbBox(itemEl) {
-            const titled = itemEl.matches('[title]') ? itemEl : itemEl.querySelector('[title]');
-            if (titled) return titled.tagName === 'IMG' ? (titled.parentElement || itemEl) : titled;
-            const bg = itemEl.querySelector('div[style*="background"]');
-            if (bg) return bg;
-            const img = itemEl.querySelector('img');
-            if (img) return img.parentElement || itemEl;
-            return itemEl.querySelector('a') || itemEl;
         }
 
         function resolveLink(itemEl) {
@@ -2577,9 +2596,13 @@
             const pageNum = m ? m[2] : '000';
             const galleryId = m ? m[1] : gid;
 
-            // The button is absolutely positioned inside the link, so the
-            // link must be both a containing block and a real box.
-            link.style.position = 'relative';
+            // Anchor the button to the painted thumbnail rather than the
+            // grid cell: the cell is taller by the height of the "Page N"
+            // caption, so anchoring there pushes the button off the image
+            // and onto the caption.
+            const item = link.closest('#gdt > *') || link;
+            const host = resolveThumbBox(item) || link;
+            if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
             if (getComputedStyle(link).display === 'inline') link.style.display = 'inline-block';
 
             const btn = document.createElement('button');
@@ -2599,7 +2622,7 @@
                 DownloadQueue.push({ viewerUrl: link.href, galleryId, pageNum, btn });
             });
 
-            link.appendChild(btn);
+            host.appendChild(btn);
         }
 
         refreshGallerySavedStats();
