@@ -1,9 +1,15 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      1.3.6
-// @description  Downloads originals sequentially or from viewer. Features persistent download memory, Ctrl+Hover live image preview (animated), floating gallery control bar, front page gallery peeker (with Uploader, Language, File Size, and Pages), quota countdown, and smooth viewer navigation.
+// @version      15.0.0
+// @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
+// @license      GPL-3.0
+// @homepageURL  https://github.com/Nyashers/ExHDownloader
+// @supportURL   https://github.com/Nyashers/ExHDownloader/issues
+// @updateURL    https://raw.githubusercontent.com/Nyashers/ExHDownloader/main/ExHDownloader.user.js
+// @downloadURL  https://raw.githubusercontent.com/Nyashers/ExHDownloader/main/ExHDownloader.user.js
+// @icon         https://e-hentai.org/favicon.ico
 // @match        *://exhentai.org/*
 // @match        *://e-hentai.org/*
 // @match        *://*.e-hentai.org/*
@@ -11,923 +17,2000 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_info
 // @connect      *
+// @run-at       document-end
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
-    // === Native ExHentai Matte Dark Styling with Floating Bar & Rich Metadata ===
-    GM_addStyle(`
-        /* Popover Entrance Animations */
-        @keyframes ehFadeScaleIn {
-            0% {
-                opacity: 0;
-                transform: scale(0.97);
-            }
-            100% {
-                opacity: 1;
-                transform: scale(1);
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.0.0';
+    const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
+
+    // =====================================================================
+    // === THEME DETECTION =================================================
+    // The site ships several colour schemes. Sample the real page rather
+    // than hardcoding one palette, so the injected UI stays homogeneous.
+    // =====================================================================
+    function luminanceOf(cssColor) {
+        const m = String(cssColor || '').match(/rgba?\(([^)]+)\)/);
+        if (!m) return null;
+        const parts = m[1].split(',').map(n => parseFloat(n));
+        const [r, g, b, a] = parts;
+        if ([r, g, b].some(v => typeof v !== 'number' || isNaN(v))) return null;
+        if (parts.length > 3 && a === 0) return null; // fully transparent tells us nothing
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    }
+
+    function detectSiteTheme() {
+        for (const el of [document.body, document.documentElement]) {
+            if (!el) continue;
+            const lum = luminanceOf(getComputedStyle(el).backgroundColor);
+            if (lum !== null) return lum > 0.5 ? 'light' : 'dark';
+        }
+        return 'dark';
+    }
+
+    document.documentElement.setAttribute('data-eh-theme', detectSiteTheme());
+
+    const CSS = `
+        :root[data-eh-theme="dark"] {
+            --eh-panel:        #2c2d32;
+            --eh-panel-raised: #34353b;
+            --eh-panel-sunken: #18191c;
+            --eh-line:         #4f535b;
+            --eh-line-lit:     #72767d;
+            --eh-text:         #edebdf;
+            --eh-text-dim:     #a0a0a0;
+            --eh-text-strong:  #ffffff;
+            --eh-hover:        #4f535b;
+            --eh-shadow:       rgba(0, 0, 0, 0.65);
+        }
+        :root[data-eh-theme="light"] {
+            --eh-panel:        #ededed;
+            --eh-panel-raised: #f8f8f8;
+            --eh-panel-sunken: #dcdcdc;
+            --eh-line:         #b4b4b4;
+            --eh-line-lit:     #8a8a8a;
+            --eh-text:         #34302c;
+            --eh-text-dim:     #6c6759;
+            --eh-text-strong:  #17140f;
+            --eh-hover:        #dcdcdc;
+            --eh-shadow:       rgba(0, 0, 0, 0.28);
+        }
+        :root {
+            --eh-ok:       #2ecc71;
+            --eh-ok-dim:   #58d68d;
+            --eh-ok-deep:  #164024;
+            --eh-warn:     #e6a23c;
+            --eh-danger:   #c0392b;
+            --eh-info:     #3498db;
+            --eh-radius:   3px;
+            --eh-font:     Tahoma, Verdana, Arial, sans-serif;
+            --eh-ctl-h:    26px;
+        }
+
+        @keyframes ehFadeScaleIn { from { opacity: 0; transform: scale(0.97); } to { opacity: 1; transform: scale(1); } }
+        @keyframes ehShimmer     { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+        @keyframes ehSpin        { to { transform: rotate(360deg); } }
+
+        /* Honour the OS "reduce motion" setting across every injected surface. */
+        @media (prefers-reduced-motion: reduce) {
+            #eh-top-control-bar *, #eh-dl-manager *, #eh-viewer-control-bar *,
+            #eh-image-preview-popup, #eh-image-preview-popup *,
+            #eh-gallery-peek-popup, #eh-gallery-peek-popup *,
+            .eh-dl-btn, .eh-thumb-fetching::after, .eh-peek-thumb.skeleton {
+                animation: none !important;
+                transition: none !important;
             }
         }
 
-        /* Shimmer Loading Animation for Skeletons */
-        @keyframes ehShimmer {
-            0% { background-position: -200% 0; }
-            100% { background-position: 200% 0; }
-        }
-
-        /* Top Control Bar (Gallery Page & List Pages) - Floating & Sticky */
+        /* ---------- Top control bar ---------- */
         #eh-top-control-bar {
-            background: rgba(52, 53, 59, 0.96);
-            backdrop-filter: blur(8px);
-            border: 1px solid #4f535b;
-            border-radius: 4px;
+            background: var(--eh-panel-raised);
+            border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius);
+            box-shadow: 0 4px 16px var(--eh-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.05);
             padding: 7px 12px;
             margin: 8px auto;
             max-width: 1212px;
             width: calc(100% - 20px);
             box-sizing: border-box;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.65);
             display: flex;
             justify-content: space-between;
             align-items: center;
             flex-wrap: wrap;
             gap: 8px;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-            color: #edebdf;
+            font-family: var(--eh-font);
+            color: var(--eh-text);
             font-size: 12px;
             position: sticky;
             top: 8px;
             z-index: 1000;
         }
-
-        .eh-top-left {
-            display: flex;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 8px;
+        @supports (backdrop-filter: blur(8px)) {
+            #eh-top-control-bar { background: rgba(52, 53, 59, 0.96); backdrop-filter: blur(8px); }
+            :root[data-eh-theme="light"] #eh-top-control-bar { background: rgba(248, 248, 248, 0.96); }
         }
+        .eh-top-left  { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+        .eh-top-right { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--eh-text-dim); white-space: nowrap; }
+        .eh-top-right a { color: var(--eh-text-dim); text-decoration: none; }
+        .eh-top-right a:hover { color: var(--eh-ok-dim); text-decoration: underline; }
 
-        .eh-top-right {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 11px;
-            color: #a0a0a0;
-            font-weight: normal;
-        }
-
-        /* Matte Solid Buttons with Smooth Transition */
+        /* ---------- Buttons ---------- */
         .eh-top-btn {
-            background: #2c2d32;
-            color: #edebdf;
-            border: 1px solid #4f535b;
-            border-radius: 3px;
-            height: 26px;
+            background: var(--eh-panel);
+            color: var(--eh-text);
+            border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius);
+            height: var(--eh-ctl-h);
             padding: 0 11px;
             box-sizing: border-box;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
+            font-family: var(--eh-font);
             font-size: 12px;
             font-weight: bold;
             cursor: pointer;
-            transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+            transition: background .18s cubic-bezier(.4,0,.2,1), color .18s, border-color .18s, transform .18s;
             user-select: none;
             display: inline-flex;
             align-items: center;
             justify-content: center;
             gap: 5px;
             line-height: 1;
+            white-space: nowrap;
+        }
+        .eh-top-btn:hover:not(:disabled) {
+            background: var(--eh-hover); color: var(--eh-text-strong);
+            border-color: var(--eh-line-lit); transform: translateY(-1px);
+        }
+        .eh-top-btn:active:not(:disabled) { transform: translateY(0); filter: brightness(.85); }
+        .eh-top-btn:disabled { opacity: .45; cursor: default; }
+        .eh-top-btn.eh-btn-danger { background: #5c1f1f; border-color: #7d2b2b; color: #f0c8c8; }
+        .eh-top-btn.eh-btn-danger:hover { background: #822e2e; color: #fff; border-color: #a03a3a; }
+        .eh-top-btn.eh-btn-warn { background: #4a3312; border-color: #7a5a20; color: #e8c98a; }
+        .eh-top-btn.eh-btn-warn:hover { background: #63430f; color: #fff; }
+
+        .eh-top-btn:focus-visible, .eh-viewer-btn:focus-visible, .eh-viewer-nav-btn:focus-visible,
+        .eh-dl-btn:focus-visible, .eh-mgr-stop-btn:focus-visible, .eh-checkbox-label:focus-within {
+            outline: 2px solid var(--eh-ok); outline-offset: 1px;
         }
 
-        .eh-top-btn:hover {
-            background: #4f535b;
-            color: #ffffff;
-            border-color: #72767d;
-            transform: translateY(-1px);
-        }
-
-        .eh-top-btn:active {
-            background: #202124;
-            transform: translateY(0);
-        }
-
-        .eh-top-btn.eh-btn-danger {
-            background: #3a2222;
-            border-color: #822e2e;
-            color: #ff9b9b;
-        }
-
-        .eh-top-btn.eh-btn-danger:hover {
-            background: #822e2e;
-            color: #ffffff;
-            border-color: #a93226;
-        }
-
-        /* Pixel-Perfect Aligned Checkbox Capsules */
+        /* ---------- Checkbox pills ---------- */
         .eh-checkbox-label {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            cursor: pointer;
-            user-select: none;
-            font-size: 11.5px;
-            color: #edebdf;
-            background: #2c2d32;
-            height: 26px;
-            padding: 0 9px;
-            box-sizing: border-box;
-            border-radius: 3px;
-            border: 1px solid #4f535b;
-            line-height: 1;
-            vertical-align: middle;
-            transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+            display: inline-flex; align-items: center; gap: 6px;
+            height: var(--eh-ctl-h); padding: 0 10px; box-sizing: border-box;
+            background: var(--eh-panel); border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius); cursor: pointer; user-select: none;
+            font-size: 12px; color: var(--eh-text); white-space: nowrap;
+            transition: background .18s, border-color .18s, color .18s;
         }
+        .eh-checkbox-label:hover { background: var(--eh-hover); border-color: var(--eh-line-lit); }
+        .eh-checkbox-label.is-on { border-color: #27ae60; color: var(--eh-ok-dim); }
+        .eh-checkbox-label input[type="checkbox"] { accent-color: var(--eh-ok); width: 13px; height: 13px; margin: 0; cursor: pointer; }
+        .eh-checkbox-label span { line-height: 1; }
 
-        .eh-checkbox-label:hover {
-            color: #ffffff;
-            border-color: #72767d;
-            background: #3a3b42;
+        /* ---------- Badges ---------- */
+        .eh-badge {
+            display: inline-flex; align-items: center; gap: 6px;
+            height: var(--eh-ctl-h); padding: 0 10px; box-sizing: border-box;
+            border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            background: var(--eh-panel-sunken); font-size: 11px;
+            color: var(--eh-text-dim); white-space: nowrap;
         }
-
-        .eh-checkbox-label input[type="checkbox"] {
-            margin: 0;
-            padding: 0;
-            cursor: pointer;
-            width: 13px;
-            height: 13px;
-            accent-color: #3498db;
-            display: inline-block;
-            vertical-align: middle;
-            flex-shrink: 0;
+        .eh-badge b { color: var(--eh-text); font-weight: bold; }
+        .eh-anim-status-badge, .eh-saved-count-badge {
+            border-color: #27ae60; background: var(--eh-ok-deep); color: var(--eh-ok-dim);
         }
-
-        .eh-checkbox-label span {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            line-height: 13px;
-            vertical-align: middle;
-            user-select: none;
-        }
-
-        /* Quota & Info Badges */
-        .eh-quota-badge {
-            background: #18191c;
-            border: 1px solid #4f535b;
-            border-radius: 3px;
-            height: 26px;
-            padding: 0 9px;
-            box-sizing: border-box;
-            font-size: 11px;
-            color: #a0a0a0;
-            display: inline-flex;
-            align-items: center;
-            line-height: 1;
-        }
-
-        .eh-quota-badge b {
-            color: #58d68d;
-            font-weight: bold;
-            margin: 0 2px;
-        }
-
-        .eh-quota-diff {
-            color: #ff6b6b;
-            font-weight: bold;
-            margin-left: 4px;
-        }
-
-        .eh-timer-badge {
-            color: #a0a0a0;
-            font-size: 10.5px;
-            margin-left: 8px;
-            padding-left: 8px;
-            border-left: 1px solid #4f535b;
-            white-space: nowrap;
-        }
-
-        .eh-saved-count-badge {
-            background: #18281e;
-            border: 1px solid #27ae60;
-            border-radius: 3px;
-            height: 26px;
-            padding: 0 9px;
-            box-sizing: border-box;
-            font-size: 11px;
-            color: #58d68d;
-            font-weight: bold;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            line-height: 1;
-        }
-
-        .eh-hint-badge {
-            background: #25262b;
-            border: 1px dashed #4f535b;
-            border-radius: 3px;
-            height: 26px;
-            padding: 0 8px;
-            box-sizing: border-box;
-            font-size: 11px;
-            color: #a0a0a0;
-            display: inline-flex;
-            align-items: center;
-            line-height: 1;
-            user-select: none;
-        }
-
+        .eh-saved-count-badge b { color: #fff; }
+        .eh-anim-spin-icon { display: inline-block; animation: ehSpin 1.1s linear infinite; }
+        .eh-quota-diff { color: var(--eh-warn); font-weight: bold; margin-left: 2px; }
+        .eh-timer-badge { font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+        .eh-quota-badge.eh-quota-low { border-color: var(--eh-danger); color: #e69c94; }
+        .eh-quota-badge.eh-quota-low b { color: #ff8f80; }
         .eh-hint-badge kbd {
-            background: #18191c;
-            border: 1px solid #4f535b;
-            border-radius: 2px;
-            padding: 1px 4px;
-            font-size: 10px;
-            color: #58d68d;
-            font-family: inherit;
-            margin-right: 4px;
+            background: var(--eh-panel-raised); border: 1px solid var(--eh-line); border-bottom-width: 2px;
+            border-radius: 2px; padding: 1px 4px; font-family: var(--eh-font); font-size: 10px; color: var(--eh-text);
         }
 
-        /* Clean Thumbnail Download Buttons */
-        .eh-dl-btn {
-            position: absolute;
-            top: 6px;
-            left: 6px;
-            background: rgba(28, 29, 33, 0.92);
-            color: #edebdf;
-            border: 1px solid #4f535b;
-            border-radius: 3px;
-            padding: 3px 8px;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-            font-size: 11px;
-            font-weight: bold;
-            cursor: pointer;
-            z-index: 100;
-            transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.6);
-            user-select: none;
-            white-space: nowrap;
+        /* ---------- Per-thumbnail download button ---------- */
+        .eh-dl-btn, #gdt .eh-dl-btn {
+            position: absolute !important;
+            bottom: 4px !important; left: 50% !important;
+            transform: translateX(-50%) !important;
+            z-index: 20 !important;
+            width: calc(100% - 10px) !important;
+            max-width: 150px !important;
+            height: 20px !important;
+            padding: 0 4px !important;
+            box-sizing: border-box !important;
+            background: rgba(30, 31, 35, 0.92) !important;
+            color: #edebdf !important;
+            border: 1px solid #5c6069 !important;
+            border-radius: 2px !important;
+            font-family: var(--eh-font) !important;
+            font-size: 10px !important;
+            font-weight: bold !important;
+            line-height: 1 !important;
+            cursor: pointer !important;
+            opacity: 0.9;
+            transition: background .15s, opacity .15s, border-color .15s !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            overflow: hidden !important;
+            white-space: nowrap !important;
+            text-overflow: ellipsis !important;
         }
+        .eh-dl-btn:hover { background: rgba(46, 204, 113, .92) !important; color: #fff !important; border-color: var(--eh-ok) !important; opacity: 1; }
+        .eh-dl-btn.state-saved, #gdt .eh-dl-btn.state-saved {
+            background: rgba(22, 64, 36, .95) !important; color: var(--eh-ok-dim) !important; border-color: #27ae60 !important;
+        }
+        .eh-dl-btn.state-saved:hover, #gdt .eh-dl-btn.state-saved:hover { background: rgba(30, 90, 50, .96) !important; color: #fff !important; }
+        .eh-dl-btn.state-queued { background: rgba(60, 50, 20, .94) !important; color: #e8c98a !important; border-color: #7a5a20 !important; }
+        .eh-dl-btn.state-queued:hover { background: rgba(120, 40, 40, .94) !important; color: #fff !important; border-color: #a03a3a !important; }
+        .eh-dl-btn.state-scan { background: rgba(20, 45, 70, .94) !important; color: #7fb8e6 !important; border-color: #2c6ea8 !important; }
+        .eh-dl-btn.state-dl   { background: rgba(20, 60, 40, .94) !important; color: var(--eh-ok-dim) !important; border-color: #1f8a4d !important; }
+        .eh-dl-btn.state-err  { background: rgba(90, 25, 25, .95) !important; color: #ffb3aa !important; border-color: var(--eh-danger) !important; }
 
-        .eh-dl-btn:hover {
-            background: #4f535b;
-            color: #ffffff;
-            border-color: #3498db;
-            transform: translateY(-1px);
-            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.8);
-        }
-
-        .eh-dl-btn.state-saved {
-            color: #58d68d;
-            border-color: #27ae60;
-            background: rgba(16, 40, 24, 0.94);
-        }
-        .eh-dl-btn.state-saved:hover {
-            background: #1a4d2c;
-            border-color: #58d68d;
-            color: #ffffff;
-        }
-
-        .eh-dl-btn.state-queued {
-            color: #f39c12;
-            border-color: #d39e00;
-            background: rgba(48, 36, 12, 0.94);
-        }
-        .eh-dl-btn.state-queued:hover {
-            color: #ff6b6b;
-            border-color: #c0392b;
-            background: #441818;
-        }
-        .eh-dl-btn.state-scan {
-            color: #00bcd4;
-            border-color: #00838f;
-            background: rgba(16, 40, 48, 0.94);
-        }
+        /* Progress fill painted straight into the button, no extra element. */
         .eh-dl-btn.state-dl {
-            color: #3498db;
-            border-color: #1f618d;
-            background: rgba(16, 32, 48, 0.94);
-        }
-        .eh-dl-btn.state-done {
-            color: #58d68d;
-            border-color: #27ae60;
-            background: rgba(16, 45, 26, 0.94);
-        }
-        .eh-dl-btn.state-err {
-            color: #ff6b6b;
-            border-color: #c0392b;
-            background: rgba(51, 18, 18, 0.94);
+            background-image: linear-gradient(to right, rgba(46, 204, 113, .45) var(--eh-pct, 0%), transparent 0) !important;
+            background-repeat: no-repeat !important;
         }
 
-        /* Download Manager Floating Overlay */
+        /* Give every thumbnail box a positioning + clipping context. */
+        #gdt .gdtl, #gdt .gdtm > div, #gdt .gdtm,
+        .gt100 > a > div, .gt200 > a > div, .gt400 > a > div,
+        #gdt > a > div {
+            position: relative !important;
+            overflow: hidden !important;
+            border-radius: var(--eh-radius) !important;
+        }
+        /* Cheap paint containment: the browser can skip offscreen thumb work. */
+        #gdt > a, #gdt > div.gdtm, #gdt > div.gdtl { contain: layout paint style; }
+
+        /* ---------- Live animated thumbnails ---------- */
+        .eh-thumb-fetching::after {
+            content: '';
+            position: absolute; inset: 0;
+            background: linear-gradient(90deg, rgba(22,64,36,.2) 0%, rgba(46,204,113,.35) 50%, rgba(22,64,36,.2) 100%);
+            background-size: 200% 100%;
+            animation: ehShimmer 1.3s infinite linear;
+            z-index: 8; pointer-events: none; border-radius: inherit;
+        }
+        .eh-thumb-spinner {
+            position: absolute; bottom: 6px; left: 6px;
+            background: rgba(22, 64, 36, .94);
+            border: 1px solid var(--eh-ok);
+            color: var(--eh-ok-dim);
+            font-size: 10px; font-weight: bold;
+            padding: 2px 6px; border-radius: 2px;
+            z-index: 9; display: flex; align-items: center; gap: 4px;
+            pointer-events: none; user-select: none;
+            box-shadow: 0 2px 6px rgba(0,0,0,.7);
+            animation: ehFadeScaleIn .15s ease-out;
+        }
+        /* The live layer and its frozen canvas twin share one box so the
+           swap between them is a pure opacity change, never a reflow. */
+        .eh-live-layer {
+            position: absolute !important; inset: 0 !important;
+            z-index: 5 !important; border-radius: inherit !important;
+            pointer-events: none !important;
+            opacity: 0; transition: opacity .22s ease-in;
+        }
+        .eh-live-layer.is-shown { opacity: 1; }
+        .eh-live-layer > img, .eh-live-layer > canvas {
+            position: absolute; inset: 0;
+            width: 100%; height: 100%;
+            object-fit: contain;
+            border-radius: inherit;
+            background: rgba(0, 0, 0, .15);
+        }
+        .eh-live-layer > canvas { display: none; }
+        .eh-live-layer.is-frozen > img    { visibility: hidden; }
+        .eh-live-layer.is-frozen > canvas { display: block; }
+        .eh-anim-badge {
+            position: absolute !important; bottom: 4px !important; right: 4px !important;
+            background: rgba(39, 174, 96, .92) !important; color: #fff !important;
+            font-size: 9px !important; font-weight: bold !important;
+            padding: 2px 4px !important; border-radius: 2px !important;
+            z-index: 10 !important; pointer-events: none !important;
+            line-height: 1 !important; letter-spacing: .5px !important;
+            box-shadow: 0 1px 3px rgba(0,0,0,.75) !important; user-select: none !important;
+        }
+        .eh-anim-badge.is-frozen { background: rgba(90, 95, 105, .92) !important; }
+
+        /* ---------- Download manager ---------- */
         #eh-dl-manager {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            width: 360px;
-            background: #2c2d32;
-            border: 1px solid #5c5c5c;
-            border-radius: 4px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.85);
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-            color: #edebdf;
-            z-index: 99999;
-            overflow: hidden;
-            display: none;
-            flex-direction: column;
-            font-size: 12px;
-            animation: ehFadeScaleIn 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            position: fixed; bottom: 20px; right: 20px; width: 360px; max-width: calc(100vw - 24px);
+            background: var(--eh-panel);
+            border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius);
+            box-shadow: 0 8px 24px var(--eh-shadow);
+            font-family: var(--eh-font); font-size: 12px; color: var(--eh-text);
+            z-index: 99999; overflow: hidden;
+            opacity: 0; transform: translateY(12px); pointer-events: none;
+            transition: opacity .2s ease, transform .2s ease;
         }
-        #eh-dl-manager.active {
-            display: flex;
-        }
+        #eh-dl-manager.active { opacity: 1; transform: translateY(0); pointer-events: auto; }
+        #eh-dl-manager.collapsed .eh-mgr-body { display: none; }
         .eh-mgr-header {
-            background: #34353b;
-            padding: 8px 12px;
-            font-weight: bold;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid #4f535b;
-            font-size: 12px;
-            color: #edebdf;
+            display: flex; justify-content: space-between; align-items: center;
+            background: var(--eh-panel-raised); border-bottom: 1px solid var(--eh-line);
+            padding: 7px 10px; font-weight: bold; cursor: move; user-select: none;
         }
-        .eh-mgr-header-actions {
-            display: flex;
-            align-items: center;
-            gap: 8px;
+        .eh-mgr-header-actions { display: flex; align-items: center; gap: 8px; font-weight: normal; font-size: 11px; color: var(--eh-text-dim); }
+        .eh-mgr-stop-btn, .eh-mgr-min-btn {
+            background: #5c1f1f; border: 1px solid #7d2b2b; color: #f0c8c8;
+            border-radius: 2px; padding: 2px 7px; font-size: 10px; font-weight: bold;
+            cursor: pointer; font-family: var(--eh-font); transition: background .15s;
         }
-        .eh-mgr-stop-btn {
-            background: #922b21;
-            color: #ffffff;
-            border: 1px solid #c0392b;
-            border-radius: 3px;
-            padding: 2px 7px;
-            font-size: 10px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }
-        .eh-mgr-stop-btn:hover {
-            background: #c0392b;
-        }
-        .eh-mgr-body {
-            padding: 12px;
-            max-height: 280px;
-            overflow-y: auto;
-        }
+        .eh-mgr-min-btn { background: var(--eh-panel); border-color: var(--eh-line); color: var(--eh-text-dim); }
+        .eh-mgr-stop-btn:hover { background: #822e2e; color: #fff; }
+        .eh-mgr-min-btn:hover  { background: var(--eh-hover); color: var(--eh-text); }
+        .eh-mgr-body { padding: 9px 10px 10px; }
         .eh-mgr-title {
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            font-weight: bold;
-            margin-bottom: 6px;
-            color: #ffffff;
+            font-size: 11px; color: var(--eh-text); margin-bottom: 7px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .eh-progress-bg {
-            background: #18191c;
-            border: 1px solid #4f535b;
-            border-radius: 3px;
-            height: 16px;
-            width: 100%;
-            overflow: hidden;
-            position: relative;
+            position: relative; height: 16px; background: var(--eh-panel-sunken);
+            border: 1px solid var(--eh-line); border-radius: 2px; overflow: hidden;
         }
         .eh-progress-fill {
-            background: linear-gradient(90deg, #1f618d, #27ae60);
-            height: 100%;
-            width: 0%;
-            transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            height: 100%; width: 0;
+            background: linear-gradient(90deg, #1f8a4d, var(--eh-ok));
+            transition: width .12s linear;
         }
         .eh-progress-text {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            font-size: 10px;
-            line-height: 16px;
-            text-align: center;
-            color: #ffffff;
-            font-weight: bold;
-            text-shadow: 1px 1px 2px #000;
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            font-size: 10px; font-weight: bold; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.85);
+            font-variant-numeric: tabular-nums;
         }
-        .eh-mgr-queue-list {
-            margin-top: 10px;
-            border-top: 1px solid #4f535b;
-            padding-top: 8px;
-            font-size: 11px;
-            color: #a0a0a0;
+        .eh-mgr-stats {
+            display: flex; justify-content: space-between; gap: 8px;
+            margin-top: 6px; font-size: 10px; color: var(--eh-text-dim);
+            font-variant-numeric: tabular-nums;
         }
+        .eh-mgr-queue-list { margin-top: 8px; max-height: 132px; overflow-y: auto; overscroll-behavior: contain; }
         .eh-mgr-queue-item {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 3px 0;
-            white-space: nowrap;
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 3px 6px; border-radius: 2px; font-size: 11px; color: var(--eh-text-dim);
         }
-        .eh-mgr-queue-item:hover {
-            color: #ffffff;
+        .eh-mgr-queue-item:hover { background: var(--eh-panel-raised); color: var(--eh-text); }
+        .eh-mgr-queue-item.is-failed { color: #e69c94; }
+        .eh-queue-item-remove { cursor: pointer; color: #b06a6a; font-weight: bold; padding: 0 3px; }
+        .eh-queue-item-remove:hover { color: #ff6b6b; }
+        .eh-mgr-alert {
+            margin-top: 8px; padding: 6px 8px; border-radius: 2px;
+            background: rgba(90, 25, 25, .5); border: 1px solid var(--eh-danger);
+            color: #ffb3aa; font-size: 11px; line-height: 1.4; display: none;
         }
-        .eh-queue-item-remove {
-            color: #ff6b6b;
-            cursor: pointer;
-            margin-left: 6px;
-            padding: 0 4px;
-            font-weight: bold;
-        }
-        .eh-queue-item-remove:hover {
-            color: #ff3333;
-        }
+        .eh-mgr-alert.is-shown { display: block; }
 
-        /* Control Bar on Viewer Page (/s/*) */
+        /* ---------- Viewer bar ---------- */
         #eh-viewer-control-bar {
-            background: #34353b;
-            border: 1px solid #4f535b;
-            border-radius: 4px;
-            padding: 7px 12px;
-            margin: 10px auto;
-            max-width: 950px;
-            width: calc(100% - 20px);
-            box-sizing: border-box;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 8px;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-            color: #edebdf;
-            font-size: 12px;
+            display: flex; justify-content: space-between; align-items: center;
+            flex-wrap: wrap; gap: 8px;
+            background: var(--eh-panel-raised);
+            border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            box-shadow: 0 3px 12px var(--eh-shadow), inset 0 1px 0 rgba(255,255,255,.05);
+            padding: 7px 12px; margin: 8px auto; max-width: 1212px;
+            width: calc(100% - 20px); box-sizing: border-box;
+            font-family: var(--eh-font); font-size: 12px; color: var(--eh-text);
         }
-
-        .eh-viewer-left {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-
+        .eh-viewer-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .eh-viewer-sep { width: 1px; height: 18px; background: var(--eh-line); flex-shrink: 0; }
         .eh-viewer-nav-btn {
-            background: #2c2d32;
-            color: #edebdf;
-            border: 1px solid #4f535b;
-            border-radius: 3px;
-            padding: 5px 12px;
-            font-size: 12px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-            user-select: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            text-decoration: none;
-            white-space: nowrap;
+            display: inline-flex; align-items: center; justify-content: center;
+            height: var(--eh-ctl-h); padding: 0 12px; box-sizing: border-box;
+            background: var(--eh-panel); border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            color: var(--eh-text) !important; text-decoration: none !important;
+            font-size: 12px; font-weight: bold; white-space: nowrap;
+            transition: background .15s, color .15s, border-color .15s;
         }
-
-        .eh-viewer-nav-btn:hover {
-            background: #4f535b;
-            color: #ffffff;
-            border-color: #72767d;
-            transform: translateY(-1px);
-        }
-
-        .eh-viewer-nav-btn.disabled {
-            opacity: 0.35;
-            pointer-events: none;
-            cursor: default;
-            transform: none;
-        }
-
+        .eh-viewer-nav-btn:hover { background: var(--eh-hover); color: var(--eh-text-strong) !important; border-color: var(--eh-line-lit); }
+        .eh-viewer-nav-btn.disabled { opacity: .35; pointer-events: none; }
         .eh-viewer-btn {
-            background: #2c2d32;
-            color: #edebdf;
-            border: 1px solid #4f535b;
-            border-radius: 3px;
-            padding: 5px 12px;
-            font-size: 12px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1);
-            user-select: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 5px;
-            white-space: nowrap;
+            height: var(--eh-ctl-h); padding: 0 12px; box-sizing: border-box;
+            background: var(--eh-ok-deep); color: var(--eh-ok-dim);
+            border: 1px solid #27ae60; border-radius: var(--eh-radius);
+            font-family: var(--eh-font); font-size: 12px; font-weight: bold;
+            cursor: pointer; white-space: nowrap;
+            display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+            transition: background .15s, color .15s;
         }
-
-        .eh-viewer-btn:hover {
-            background: #4f535b;
-            color: #ffffff;
-            border-color: #72767d;
-            transform: translateY(-1px);
-        }
-
-        .eh-viewer-btn.state-saved {
-            background: #18281e;
-            border-color: #27ae60;
-            color: #58d68d;
-        }
-        .eh-viewer-btn.state-saved:hover {
-            background: #1a4d2c;
-            border-color: #58d68d;
-            color: #ffffff;
-        }
-
-        .eh-viewer-btn.state-dl {
-            background: #102030;
-            border-color: #1f618d;
-            color: #3498db;
-        }
-        .eh-viewer-btn.state-done {
-            background: #102d1a;
-            border-color: #27ae60;
-            color: #58d68d;
-        }
-        .eh-viewer-btn.state-err {
-            background: #331212;
-            border-color: #c0392b;
-            color: #ff6b6b;
-        }
-
+        .eh-viewer-btn:hover { background: #1d5a32; color: #fff; }
+        .eh-viewer-btn.state-saved { background: var(--eh-panel); border-color: #27ae60; color: var(--eh-ok-dim); }
+        .eh-viewer-btn.state-dl { background: #14324a; border-color: #2c6ea8; color: #7fb8e6; cursor: default; }
+        .eh-viewer-btn.state-err { background: #5a1919; border-color: var(--eh-danger); color: #ffb3aa; }
         .eh-viewer-cancel-btn {
-            background: #3a2222;
-            border: 1px solid #822e2e;
-            color: #ff9b9b;
-            border-radius: 3px;
-            padding: 5px 10px;
-            font-size: 11px;
-            font-weight: bold;
-            cursor: pointer;
-            display: none;
-            white-space: nowrap;
-            transition: all 0.15s ease;
+            height: var(--eh-ctl-h); padding: 0 10px; box-sizing: border-box;
+            background: #5c1f1f; color: #f0c8c8; border: 1px solid #7d2b2b;
+            border-radius: var(--eh-radius); font-family: var(--eh-font);
+            font-size: 11px; font-weight: bold; cursor: pointer; display: none; white-space: nowrap;
         }
+        .eh-viewer-cancel-btn:hover { background: #822e2e; color: #fff; }
 
-        .eh-viewer-cancel-btn:hover {
-            background: #822e2e;
-            color: #ffffff;
-        }
-
-        /* === Image Hover Preview Popover in Gallery (/g/*) === */
+        /* ---------- Ctrl+Hover image preview ---------- */
         #eh-image-preview-popup {
-            position: fixed;
-            z-index: 100000;
-            background: #2c2d32;
-            border: 1px solid #5c5c5c;
-            border-radius: 4px;
-            padding: 8px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.92);
-            display: none;
-            pointer-events: none;
-            max-width: 90vw;
-            max-height: 85vh;
-            min-width: 240px;
-            min-height: 320px;
-            box-sizing: border-box;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            animation: ehFadeScaleIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            position: fixed; top: 0; left: 0; z-index: 100000;
+            background: var(--eh-panel); border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius); padding: 8px;
+            box-shadow: 0 8px 30px var(--eh-shadow);
+            display: none; flex-direction: column; align-items: center; justify-content: center;
+            pointer-events: none; box-sizing: border-box;
+            max-width: 92vw; max-height: 88vh;
+            will-change: transform;
+            animation: ehFadeScaleIn .16s cubic-bezier(.16,1,.3,1) forwards;
         }
-
-        #eh-image-preview-popup.loaded {
-            min-width: auto;
-            min-height: auto;
+        #eh-image-preview-popup.is-open { display: flex; }
+        .eh-preview-stage {
+            position: relative; display: flex; align-items: center; justify-content: center;
+            background: var(--eh-panel-sunken); border-radius: 2px; overflow: hidden;
         }
-
-        #eh-image-preview-popup img {
-            max-width: 580px;
-            max-height: 72vh;
-            border-radius: 2px;
-            display: block;
-            object-fit: contain;
-            opacity: 0;
-            transition: opacity 0.16s ease-in;
+        .eh-preview-stage.is-skeleton {
+            background: linear-gradient(90deg, var(--eh-panel-sunken) 25%, var(--eh-panel-raised) 50%, var(--eh-panel-sunken) 75%);
+            background-size: 200% 100%; animation: ehShimmer 1.4s infinite linear;
         }
-
-        #eh-image-preview-popup img.img-ready {
-            opacity: 1;
+        #eh-preview-img {
+            display: block; max-width: 100%; max-height: 100%;
+            object-fit: contain; opacity: 0; transition: opacity .18s ease-in;
         }
-
-        .eh-preview-caption {
-            margin-top: 6px;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-            font-size: 11px;
-            color: #a0a0a0;
-            text-align: center;
-            font-weight: bold;
-            white-space: nowrap;
-        }
-
-        /* === Front Page Gallery Peeker Popover === */
-        #eh-gallery-peek-popup {
-            position: fixed;
-            z-index: 100000;
-            background: #2c2d32;
-            border: 1px solid #5c5c5c;
-            border-radius: 4px;
-            padding: 10px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.92);
-            display: none;
-            width: 470px;
-            min-height: 380px;
-            max-width: 95vw;
-            box-sizing: border-box;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-            color: #edebdf;
-            font-size: 11px;
-            pointer-events: none;
-            animation: ehFadeScaleIn 0.16s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-        }
-
-        .eh-peek-header {
-            font-weight: bold;
-            font-size: 12px;
-            color: #ffffff;
-            margin-bottom: 6px;
-            line-height: 1.3;
-            height: 16px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .eh-peek-meta {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 6px 12px;
-            color: #a0a0a0;
-            font-size: 11px;
-            margin-bottom: 8px;
-            border-bottom: 1px solid #4f535b;
-            padding-bottom: 6px;
-            box-sizing: border-box;
-        }
-
-        .eh-peek-meta span {
-            display: inline-flex;
-            align-items: center;
-            gap: 3px;
-            white-space: nowrap;
-        }
-
-        .eh-peek-meta span b {
-            color: #58d68d;
-            font-weight: bold;
-        }
-
-        .eh-peek-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 105px);
-            justify-content: space-between;
-            gap: 6px;
-            height: 304px;
-            overflow: hidden;
-            box-sizing: border-box;
-        }
-
-        .eh-peek-thumb {
-            width: 105px;
-            height: 148px;
-            background-color: #18191c;
-            border: 1px solid #4f535b;
-            border-radius: 2px;
-            overflow: hidden;
-            position: relative;
-            display: flex;
-            align-items: flex-start;
-            justify-content: flex-start;
-            box-sizing: border-box;
-        }
-
-        .eh-peek-thumb.skeleton {
-            background: linear-gradient(90deg, #1c1d21 25%, #2a2b30 50%, #1c1d21 75%);
-            background-size: 200% 100%;
-            animation: ehShimmer 1.4s infinite linear;
-            border-color: #38393e;
-        }
-
+        #eh-preview-img.img-ready { opacity: 1; }
         .eh-preview-spinner {
-            color: #888;
-            font-size: 11px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
+            position: absolute; color: var(--eh-text-dim); font-size: 11px;
+            display: flex; align-items: center; gap: 6px; font-family: var(--eh-font);
         }
-    `);
+        .eh-preview-caption {
+            margin-top: 6px; font-family: var(--eh-font); font-size: 11px;
+            color: var(--eh-text-dim); text-align: center; font-weight: bold;
+            max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .eh-preview-caption b { color: var(--eh-ok-dim); }
 
-    // === Settings & Storage Helpers ===
-    function getSetting(key, def) {
-        if (typeof GM_getValue !== 'undefined') return GM_getValue(key, def);
-        const val = localStorage.getItem(key);
-        if (val === null) return def;
-        return val === 'true';
+        /* ---------- Gallery peeker ---------- */
+        #eh-gallery-peek-popup {
+            position: fixed; top: 0; left: 0; z-index: 100000;
+            background: var(--eh-panel); border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius); padding: 10px;
+            box-shadow: 0 8px 32px var(--eh-shadow);
+            display: none; width: 470px; max-width: 95vw; box-sizing: border-box;
+            font-family: var(--eh-font); color: var(--eh-text); font-size: 11px;
+            pointer-events: none; will-change: transform;
+            animation: ehFadeScaleIn .16s cubic-bezier(.16,1,.3,1) forwards;
+        }
+        #eh-gallery-peek-popup.is-open { display: block; }
+        .eh-peek-header {
+            font-weight: bold; font-size: 12px; color: var(--eh-text-strong);
+            margin-bottom: 6px; line-height: 1.3;
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+            overflow: hidden; min-height: 16px;
+        }
+        .eh-peek-meta {
+            display: flex; flex-wrap: wrap; align-items: center; gap: 5px 12px;
+            color: var(--eh-text-dim); font-size: 11px; margin-bottom: 8px;
+            border-bottom: 1px solid var(--eh-line); padding-bottom: 6px;
+        }
+        .eh-peek-meta span { display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+        .eh-peek-meta b { color: var(--eh-ok-dim); font-weight: bold; }
+        .eh-peek-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; max-height: 40px; overflow: hidden; }
+        .eh-peek-tag {
+            background: var(--eh-panel-sunken); border: 1px solid var(--eh-line);
+            border-radius: 2px; padding: 1px 5px; font-size: 10px; color: var(--eh-text-dim); white-space: nowrap;
+        }
+        .eh-peek-grid {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 6px; box-sizing: border-box;
+        }
+        .eh-peek-thumb {
+            position: relative; aspect-ratio: 105 / 148;
+            background-color: var(--eh-panel-sunken);
+            border: 1px solid var(--eh-line); border-radius: 2px;
+            overflow: hidden; display: flex; align-items: center; justify-content: center;
+        }
+        .eh-peek-thumb > img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .eh-peek-thumb > .eh-sprite {
+            position: absolute; top: 50%; left: 50%;
+            transform-origin: center center; background-repeat: no-repeat;
+        }
+        .eh-peek-thumb.skeleton {
+            background: linear-gradient(90deg, var(--eh-panel-sunken) 25%, var(--eh-panel-raised) 50%, var(--eh-panel-sunken) 75%);
+            background-size: 200% 100%; animation: ehShimmer 1.4s infinite linear;
+        }
+        .eh-peek-empty { grid-column: 1 / -1; text-align: center; color: var(--eh-text-dim); padding: 24px 0; }
+    `;
+
+    if (typeof GM_addStyle === 'function') {
+        GM_addStyle(CSS);
+    } else {
+        const style = document.createElement('style');
+        style.textContent = CSS;
+        document.head.appendChild(style);
     }
+    // =====================================================================
+    // === SMALL UTILITIES =================================================
+    // =====================================================================
+    const $  = (sel, root = document) => root.querySelector(sel);
+    const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-    function setSetting(key, val) {
-        if (typeof GM_setValue !== 'undefined') {
-            GM_setValue(key, val);
-        } else {
-            localStorage.setItem(key, String(val));
-        }
-    }
+    const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-    function getDownloadHistory() {
-        let raw = null;
-        if (typeof GM_getValue !== 'undefined') {
-            raw = GM_getValue('eh_download_history_v1', '{}');
-        } else {
-            raw = localStorage.getItem('eh_download_history_v1') || '{}';
-        }
-        try {
-            return JSON.parse(raw) || {};
-        } catch (e) {
-            return {};
-        }
-    }
-
-    function saveDownloadHistory(historyObj) {
-        const str = JSON.stringify(historyObj);
-        if (typeof GM_setValue !== 'undefined') {
-            GM_setValue('eh_download_history_v1', str);
-        } else {
-            localStorage.setItem('eh_download_history_v1', str);
-        }
-    }
-
-    function markPageDownloaded(galleryId, pageNum, meta = {}) {
-        if (!galleryId || !pageNum) return;
-        const gid = String(galleryId);
-        const pnum = String(pageNum);
-        const history = getDownloadHistory();
-        if (!history[gid]) history[gid] = {};
-        history[gid][pnum] = {
-            time: Date.now(),
-            res: meta.res || '',
-            size: meta.size || ''
+    /** Coalesce bursts of calls into one call per animation frame. */
+    function rafThrottle(fn) {
+        let queued = false;
+        let lastArgs = null;
+        return function throttled(...args) {
+            lastArgs = args;
+            if (queued) return;
+            queued = true;
+            requestAnimationFrame(() => {
+                queued = false;
+                fn.apply(this, lastArgs);
+            });
         };
-        saveDownloadHistory(history);
     }
 
-    function isPageDownloaded(galleryId, pageNum) {
-        if (!galleryId || !pageNum) return false;
-        const history = getDownloadHistory();
-        const gid = String(galleryId);
-        const pnum = String(pageNum);
-        return !!(history[gid] && history[gid][pnum]);
+    /** Bounded cache so long browsing sessions cannot grow without limit. */
+    class LruMap extends Map {
+        constructor(limit) { super(); this.limit = limit; }
+        get(key) {
+            if (!super.has(key)) return undefined;
+            const val = super.get(key);
+            super.delete(key);
+            super.set(key, val);
+            return val;
+        }
+        set(key, val) {
+            if (super.has(key)) super.delete(key);
+            super.set(key, val);
+            while (this.size > this.limit) super.delete(super.keys().next().value);
+            return this;
+        }
     }
 
-    function getGalleryDownloadedMap(galleryId) {
-        if (!galleryId) return {};
-        const history = getDownloadHistory();
-        return history[String(galleryId)] || {};
+    function formatBytes(n) {
+        if (!n && n !== 0) return '';
+        if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+        if (n >= 1024) return (n / 1024).toFixed(0) + ' KB';
+        return n + ' B';
     }
+
+    function formatDuration(seconds) {
+        if (!isFinite(seconds) || seconds < 0) return '--';
+        const s = Math.round(seconds);
+        if (s < 60) return s + 's';
+        const m = Math.floor(s / 60);
+        if (m < 60) return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+        return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+    }
+
+    const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+
+    /**
+     * Produce a name every mainstream filesystem accepts. Beyond stripping
+     * illegal characters this also trims trailing dots/spaces and caps the
+     * length, both of which silently break saves on Windows.
+     */
+    function sanitizeFilename(name, maxLen = 120) {
+        let out = String(name || '')
+            .replace(/\p{Cc}/gu, '')
+            .replace(/[\\/:*?"<>|]/g, '_')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .replace(/[. ]+$/, '');
+        if (WINDOWS_RESERVED.test(out)) out = '_' + out;
+        if (out.length > maxLen) out = out.slice(0, maxLen).replace(/[. ]+$/, '');
+        return out || 'ExHentai_Gallery';
+    }
+
+    // =====================================================================
+    // === PERSISTENT STORAGE ==============================================
+    // The old build re-parsed and re-serialised the whole history on every
+    // single page mark. Keep one in-memory copy and flush it lazily.
+    // =====================================================================
+    const HAS_GM_STORE = typeof GM_getValue !== 'undefined' && typeof GM_setValue !== 'undefined';
+    const HISTORY_KEY = 'eh_download_history_v1';
+
+    function rawGet(key, def) {
+        if (HAS_GM_STORE) return GM_getValue(key, def);
+        const v = localStorage.getItem(key);
+        return v === null ? def : v;
+    }
+
+    function rawSet(key, val) {
+        if (HAS_GM_STORE) GM_setValue(key, val);
+        else localStorage.setItem(key, String(val));
+    }
+
+    function getSetting(key, def) {
+        const raw = rawGet(key, undefined);
+        if (raw === undefined || raw === null) return def;
+        if (typeof def === 'boolean') return raw === true || raw === 'true';
+        if (typeof def === 'number') {
+            const n = Number(raw);
+            return isNaN(n) ? def : n;
+        }
+        return raw;
+    }
+
+    function setSetting(key, val) { rawSet(key, val); }
+
+    const History = (() => {
+        let cache = null;
+        let dirty = false;
+        let flushTimer = null;
+
+        function load() {
+            if (cache) return cache;
+            try {
+                cache = JSON.parse(rawGet(HISTORY_KEY, '{}')) || {};
+            } catch {
+                cache = {};
+            }
+            return cache;
+        }
+
+        function flush() {
+            if (!dirty) return;
+            dirty = false;
+            clearTimeout(flushTimer);
+            flushTimer = null;
+            try {
+                rawSet(HISTORY_KEY, JSON.stringify(load()));
+            } catch (err) {
+                console.warn('[ExHD] Could not persist download history', err);
+            }
+        }
+
+        function scheduleFlush() {
+            dirty = true;
+            if (flushTimer) return;
+            flushTimer = setTimeout(flush, 600);
+        }
+
+        window.addEventListener('pagehide', flush);
+        document.addEventListener('visibilitychange', () => { if (document.hidden) flush(); });
+
+        return {
+            forGallery(gid) { return gid ? (load()[String(gid)] || {}) : {}; },
+            isSaved(gid, page) {
+                if (!gid || page == null) return false;
+                const g = load()[String(gid)];
+                return !!(g && g[String(page)]);
+            },
+            mark(gid, page, meta = {}) {
+                if (!gid || page == null) return;
+                const db = load();
+                const g = (db[String(gid)] = db[String(gid)] || {});
+                g[String(page)] = { time: Date.now(), res: meta.res || '', size: meta.size || '' };
+                scheduleFlush();
+            },
+            flush
+        };
+    })();
 
     function getGalleryIdFromLocation() {
-        const gMatch = location.pathname.match(/\/g\/(\d+)\//);
-        if (gMatch) return gMatch[1];
-
-        const sMatch = location.pathname.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
-        if (sMatch) return sMatch[1];
-
-        return null;
-    }
-
-    // === Utilities ===
-    function sanitizeFilename(name) {
-        return name.replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, ' ').trim();
+        const g = location.pathname.match(/\/g\/(\d+)\//);
+        if (g) return g[1];
+        const s = location.pathname.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
+        return s ? s[1] : null;
     }
 
     function getGalleryTitle() {
-        const en = document.querySelector('#gn');
-        const jp = document.querySelector('#gj');
-        const vi = document.querySelector('#i1 h1');
-        const src = (en && en.textContent) || (jp && jp.textContent) || (vi && vi.textContent) || 'ExHentai_Gallery';
+        const src = ($('#gn') && $('#gn').textContent) ||
+                    ($('#gj') && $('#gj').textContent) ||
+                    ($('#i1 h1') && $('#i1 h1').textContent) ||
+                    'ExHentai_Gallery';
         return sanitizeFilename(src);
     }
 
-    function getExtension(url) {
-        const m = url.match(/\.(png|jpg|jpeg|gif|webp)(\?|$)/i);
-        return m ? m[1].toLowerCase() : 'jpg';
+    /** Total pages, used only to pick a sane zero-pad width. */
+    function getGalleryPageCount() {
+        const gdd = $$('#gdd tr').find(tr => /Length:/i.test(tr.textContent));
+        if (gdd) {
+            const m = gdd.textContent.match(/(\d+)\s*page/i);
+            if (m) return parseInt(m[1], 10);
+        }
+        const i2 = $('#i2');
+        if (i2) {
+            const m = i2.textContent.match(/(\d+)\s*\/\s*(\d+)/);
+            if (m) return parseInt(m[2], 10);
+        }
+        const gpc = $('.gpc');
+        if (gpc) {
+            const m = gpc.textContent.match(/of\s+([\d,]+)\s+images/i);
+            if (m) return parseInt(m[1].replace(/,/g, ''), 10);
+        }
+        return 0;
     }
 
-    function showError(btn, text) {
-        btn.className = 'eh-dl-btn state-err';
-        btn.innerText = text;
-        setTimeout(() => {
-            if (btn.classList.contains('state-err')) {
-                btn.className = 'eh-dl-btn';
-                btn.innerText = '⬇ Download';
-            }
-        }, 5000);
+    function padWidthFor(total) {
+        return total > 999 ? 4 : 3;
     }
 
-    // === Quota & Polling ===
-    let lastParsedQuotaNum = null;
-    let isFetchingQuota = false;
-    let idleTimerSeconds = 60;
-    let idleIntervalId = null;
+    // =====================================================================
+    // === NETWORK LAYER ===================================================
+    // A promise wrapper over GM_xmlhttpRequest with abort, timeout,
+    // classified errors and exponential-backoff retries.
+    // =====================================================================
+    class EhError extends Error {
+        constructor(kind, message, detail) {
+            super(message || kind);
+            this.kind = kind;      // abort | timeout | network | http | quota | parse
+            this.detail = detail;
+        }
+    }
 
-    function fetchImageLimits(onComplete) {
-        if (isFetchingQuota) return;
-        isFetchingQuota = true;
+    const QUOTA_HALT = 'quota';
 
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: 'https://e-hentai.org/home.php',
-            anonymous: false,
-            onload(res) {
-                isFetchingQuota = false;
-                resetIdleTimer();
-                if (res.status === 200) {
-                    const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
-                    const p = Array.from(doc.querySelectorAll('.homebox p')).find(x => x.textContent.includes('towards your account limit of'));
-                    if (p) {
-                        const ss = p.querySelectorAll('strong');
-                        if (ss.length >= 2) {
-                            const cur = ss[0].textContent.trim();
-                            const lim = ss[1].textContent.trim();
-                            const n = parseInt(cur.replace(/,/g, ''), 10);
-                            let diff = '';
-                            if (lastParsedQuotaNum !== null && !isNaN(n) && n - lastParsedQuotaNum > 0) {
-                                diff = `<span class="eh-quota-diff">(-${n - lastParsedQuotaNum})</span>`;
-                            }
-                            if (!isNaN(n)) lastParsedQuotaNum = n;
-                            updateQuotaUI(`${cur} / ${lim}`, diff);
-                            if (onComplete) onComplete();
-                            return;
-                        }
-                    }
-                    updateQuotaUI('Not found', '');
-                } else {
-                    updateQuotaUI('Err: HTTP ' + res.status, '');
-                }
-                if (onComplete) onComplete();
-            },
-            onerror() {
-                isFetchingQuota = false;
-                resetIdleTimer();
-                updateQuotaUI('Network error', '');
-                if (onComplete) onComplete();
+    function gmRequest(opts) {
+        let handle = null;
+        let settled = false;
+        const promise = new Promise((resolve, reject) => {
+            const done = (fn, arg) => { if (!settled) { settled = true; fn(arg); } };
+            try {
+                handle = GM_xmlhttpRequest({
+                    method: 'GET',
+                    timeout: 60000,
+                    ...opts,
+                    onload:     res => done(resolve, res),
+                    onerror:    err => done(reject, new EhError('network', 'Network error', err)),
+                    ontimeout:  ()  => done(reject, new EhError('timeout', 'Request timed out')),
+                    onabort:    ()  => done(reject, new EhError('abort', 'Aborted'))
+                });
+            } catch (err) {
+                done(reject, new EhError('network', 'Request could not start', err));
             }
         });
+        promise.abort = () => { try { handle && handle.abort && handle.abort(); } catch { /* already gone */ } };
+        return promise;
     }
 
-    function updateQuotaUI(str, diffHtml) {
-        const t = document.querySelector('#eh-quota-value');
-        const m = document.querySelector('#eh-mgr-quota');
-        const v = document.querySelector('#eh-viewer-quota-value');
-        if (t) t.innerHTML = `Image Limits: <b>${str}</b> ${diffHtml}`;
-        if (m) m.innerHTML = `Quota: ${str} ${diffHtml}`;
-        if (v) v.innerHTML = `Limits: <b>${str}</b> ${diffHtml}`;
-    }
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    function startIdleTimer() {
-        if (idleIntervalId) clearInterval(idleIntervalId);
-        idleIntervalId = setInterval(() => {
-            updateTimerDisplay();
-            if (document.hidden || isProcessing) return;
-            if (--idleTimerSeconds <= 0) {
-                idleTimerSeconds = 60;
-                fetchImageLimits();
+    /**
+     * Retry transient failures only. Aborts and quota halts propagate at
+     * once: retrying either one wastes requests and, for quota, makes the
+     * ban worse.
+     */
+    async function withRetry(task, { attempts = 3, baseDelay = 1200, onRetry } = {}) {
+        let lastErr;
+        for (let i = 0; i < attempts; i++) {
+            try {
+                return await task(i);
+            } catch (err) {
+                lastErr = err;
+                const fatal = err instanceof EhError &&
+                    (err.kind === 'abort' || err.kind === QUOTA_HALT);
+                if (fatal || i === attempts - 1) throw err;
+                const wait = baseDelay * Math.pow(2, i);
+                if (onRetry) onRetry(i + 1, attempts, wait, err);
+                await sleep(wait);
             }
+        }
+        throw lastErr;
+    }
+
+    const QUOTA_TEXT = /(exceeded your image viewing limits|bandwidth exceeded|509)/i;
+
+    /** Fetch and parse an HTML document, detecting the quota interstitial. */
+    async function fetchDocument(url, opts = {}) {
+        const res = await gmRequest({ url, ...opts });
+        if (res.status !== 200) {
+            throw new EhError('http', `HTTP ${res.status}`, res.status);
+        }
+        const text = res.responseText || '';
+        if (/You have exceeded your image viewing limits/i.test(text)) {
+            throw new EhError(QUOTA_HALT, 'Image viewing limit reached');
+        }
+        return new DOMParser().parseFromString(text, 'text/html');
+    }
+
+    // --- Binary sniffing -------------------------------------------------
+    const CONTENT_TYPE_EXT = {
+        'image/jpeg': 'jpg', 'image/pjpeg': 'jpg', 'image/png': 'png',
+        'image/gif': 'gif', 'image/webp': 'webp', 'image/avif': 'avif',
+        'image/bmp': 'bmp', 'image/x-ms-bmp': 'bmp',
+        'video/webm': 'webm', 'video/mp4': 'mp4', 'application/zip': 'zip'
+    };
+
+    /**
+     * Original downloads come from /fullimg/ URLs that carry no extension,
+     * and H@H nodes routinely answer with application/octet-stream. Reading
+     * the magic bytes is the only way to name GIF/PNG/WebP originals right.
+     */
+    async function sniffExtension(blob) {
+        try {
+            const b = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+            const at = (i, ...bytes) => bytes.every((v, k) => b[i + k] === v);
+            const ascii = (i, s) => [...s].every((c, k) => b[i + k] === c.charCodeAt(0));
+
+            if (at(0, 0xFF, 0xD8, 0xFF)) return 'jpg';
+            if (at(0, 0x89, 0x50, 0x4E, 0x47)) return 'png';
+            if (ascii(0, 'GIF8')) return 'gif';
+            if (ascii(0, 'RIFF') && ascii(8, 'WEBP')) return 'webp';
+            if (at(0, 0x42, 0x4D)) return 'bmp';
+            if (at(0, 0x1A, 0x45, 0xDF, 0xA3)) return 'webm';
+            if (ascii(4, 'ftyp')) {
+                const brand = String.fromCharCode(b[8], b[9], b[10], b[11]);
+                if (/avi[fs]/i.test(brand)) return 'avif';
+                if (/heic|heix|mif1/i.test(brand)) return 'heic';
+                return 'mp4';
+            }
+            if (at(0, 0x50, 0x4B, 0x03, 0x04)) return 'zip';
+        } catch { /* fall through to header/URL guessing */ }
+        return null;
+    }
+
+    function extFromContentType(headerText) {
+        const m = String(headerText || '').match(/content-type:\s*([^;\r\n]+)/i);
+        if (!m) return null;
+        return CONTENT_TYPE_EXT[m[1].trim().toLowerCase()] || null;
+    }
+
+    function extFromUrl(url) {
+        const m = String(url || '').match(/\.(png|jpe?g|gif|webp|avif|bmp|webm|mp4)(?:\?|#|$)/i);
+        if (!m) return null;
+        const e = m[1].toLowerCase();
+        return e === 'jpeg' ? 'jpg' : e;
+    }
+
+    /** The viewer prints the true source filename in the first line of #i2. */
+    function extFromViewerDoc(doc) {
+        const i2 = doc.querySelector('#i2');
+        if (!i2) return null;
+        const first = i2.querySelector('div');
+        const text = (first || i2).textContent || '';
+        const m = text.match(/\.([a-z0-9]{2,5})\s*::/i);
+        return m ? m[1].toLowerCase().replace(/^jpeg$/, 'jpg') : null;
+    }
+
+    function isQuotaBlob(blob, res) {
+        if (!blob || blob.size === 0) return true;
+        const type = (blob.type || '').toLowerCase();
+        if (type.startsWith('text/') || type === 'application/xhtml+xml') return true;
+        if (QUOTA_TEXT.test(res.finalUrl || '')) return true;
+        return false;
+    }
+
+    /** Download bytes, verifying we actually received an image. */
+    async function fetchImageBlob(url, { referer, onprogress, onHandle } = {}) {
+        const req = gmRequest({
+            url,
+            responseType: 'blob',
+            headers: referer ? { Referer: referer } : undefined,
+            timeout: 180000,
+            onprogress
+        });
+        if (onHandle) onHandle(req);
+        const res = await req;
+
+        if (res.status === 509) throw new EhError(QUOTA_HALT, 'Bandwidth / image limit reached (509)');
+        if (res.status !== 200) throw new EhError('http', `HTTP ${res.status}`, res.status);
+
+        const blob = res.response;
+        if (isQuotaBlob(blob, res)) {
+            throw new EhError(QUOTA_HALT, 'Server returned a limit notice instead of the image');
+        }
+        return { blob, res };
+    }
+
+    /** Hand the blob to the browser's downloader and release it promptly. */
+    function saveBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = filename;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => {
+            a.remove();
+            URL.revokeObjectURL(url);
         }, 1000);
     }
+    // =====================================================================
+    // === IMAGE-LIMIT (QUOTA) TRACKER =====================================
+    // Previously the queue blocked on a home.php round trip between every
+    // single image, doubling request count and stalling throughput. Now the
+    // refresh is fire-and-forget and rate limited.
+    // =====================================================================
+    const Quota = (() => {
+        const MIN_INTERVAL_MS = 15000;
+        const IDLE_PERIOD_S = 60;
 
-    function resetIdleTimer() {
-        idleTimerSeconds = 60;
-        updateTimerDisplay();
+        let current = null;
+        let limit = null;
+        let lastFetchAt = 0;
+        let inFlight = null;
+        let countdown = IDLE_PERIOD_S;
+        let tickerId = null;
+        let busyProvider = () => false;
+
+        function render(valueText, diffHtml, low) {
+            const html = `Image Limits: <b>${valueText}</b>${diffHtml || ''}`;
+            for (const sel of ['#eh-quota-value', '#eh-viewer-quota-value']) {
+                const el = $(sel);
+                if (el) el.innerHTML = html;
+            }
+            const mgr = $('#eh-mgr-quota');
+            if (mgr) mgr.textContent = `Quota: ${valueText}`;
+            $$('.eh-quota-badge').forEach(b => b.classList.toggle('eh-quota-low', !!low));
+        }
+
+        function renderTimer() {
+            const busy = busyProvider();
+            const state = busy            ? { text: 'DL', color: 'var(--eh-info)' }
+                        : document.hidden ? { text: 'idle', color: 'var(--eh-text-dim)' }
+                        :                   { text: countdown + 's', color: 'var(--eh-text-dim)' };
+            for (const sel of ['#eh-quota-timer', '#eh-viewer-quota-timer']) {
+                const el = $(sel);
+                if (el) {
+                    el.textContent = '⏱ ' + state.text;
+                    el.style.color = state.color;
+                }
+            }
+        }
+
+        function parse(doc) {
+            const p = $$('.homebox p', doc)
+                .find(x => /towards your account limit of/i.test(x.textContent));
+            if (!p) return null;
+            const strongs = p.querySelectorAll('strong');
+            if (strongs.length < 2) return null;
+            return {
+                currentText: strongs[0].textContent.trim(),
+                limitText: strongs[1].textContent.trim(),
+                currentNum: parseInt(strongs[0].textContent.replace(/[^\d]/g, ''), 10),
+                limitNum: parseInt(strongs[1].textContent.replace(/[^\d]/g, ''), 10)
+            };
+        }
+
+        function refresh({ force = false } = {}) {
+            if (inFlight) return inFlight;
+            if (!force && Date.now() - lastFetchAt < MIN_INTERVAL_MS) return Promise.resolve();
+
+            lastFetchAt = Date.now();
+            countdown = IDLE_PERIOD_S;
+
+            inFlight = fetchDocument('https://e-hentai.org/home.php', { anonymous: false })
+                .then(doc => {
+                    const parsed = parse(doc);
+                    if (!parsed) { render('not found', '', false); return; }
+
+                    let diff = '';
+                    if (current !== null && !isNaN(parsed.currentNum) && parsed.currentNum > current) {
+                        diff = ` <span class="eh-quota-diff">(-${parsed.currentNum - current})</span>`;
+                    }
+                    current = isNaN(parsed.currentNum) ? current : parsed.currentNum;
+                    limit = isNaN(parsed.limitNum) ? limit : parsed.limitNum;
+
+                    const low = limit > 0 && current / limit > 0.9;
+                    render(`${parsed.currentText} / ${parsed.limitText}`, diff, low);
+                })
+                .catch(err => {
+                    render(err.kind === 'timeout' ? 'timed out' : 'unavailable', '', false);
+                })
+                .finally(() => {
+                    inFlight = null;
+                    renderTimer();
+                });
+
+            return inFlight;
+        }
+
+        function start(isBusy) {
+            if (typeof isBusy === 'function') busyProvider = isBusy;
+            if (tickerId) return;
+            refresh({ force: true });
+            tickerId = setInterval(() => {
+                renderTimer();
+                if (document.hidden || busyProvider()) return;
+                if (--countdown <= 0) refresh({ force: true });
+            }, 1000);
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden && !busyProvider()) refresh();
+                else renderTimer();
+            });
+        }
+
+        return {
+            start,
+            refresh,
+            renderTimer,
+            get remaining() { return limit !== null && current !== null ? limit - current : null; }
+        };
+    })();
+
+    // =====================================================================
+    // === CURSOR-FOLLOWING POPUP POSITIONER ===============================
+    // Uses transform instead of left/top so repositioning stays on the
+    // compositor and never triggers layout while the mouse moves.
+    // =====================================================================
+    function positionPopupAtCursor(popup, clientX, clientY, expectedW, expectedH) {
+        const pad = 16;
+        const w = expectedW || popup.offsetWidth || 470;
+        const h = expectedH || popup.offsetHeight || 380;
+
+        let left = clientX + pad;
+        let top = clientY + pad;
+
+        if (left + w > window.innerWidth - 12) left = clientX - w - pad;
+        if (left < 12) left = 12;
+        if (top + h > window.innerHeight - 12) top = clientY - h - pad;
+        if (top < 12) top = 12;
+
+        popup.style.transform = `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`;
     }
 
-    function updateTimerDisplay() {
-        const state = isProcessing ? { text: '⏱ [Downloading]', color: '#3498db' }
-                    : document.hidden  ? { text: '⏱ [Sleeping]',    color: '#888' }
-                    :                    { text: `⏱ ${idleTimerSeconds}s`, color: '#a0a0a0' };
-        ['#eh-quota-timer', '#eh-viewer-quota-timer'].forEach(sel => {
-            const el = document.querySelector(sel);
-            if (el) {
-                el.innerText = state.text;
-                el.style.color = state.color;
+    // =====================================================================
+    // === SHARED VIEWER-PAGE SCRAPER ======================================
+    // One parser used by the downloader, the hover preview and the live
+    // thumbnail engine, so a /s/ page is only ever fetched and parsed once.
+    // =====================================================================
+    const viewerPageCache = new LruMap(400);
+    const viewerPageInflight = new Map();
+
+    function parseViewerDoc(doc) {
+        const origNode = doc.querySelector('div#i6 a[href*="/fullimg/"]') ||
+                         doc.querySelector('a[href*="/fullimg/"]');
+        const displayImg = doc.querySelector('img#img');
+        const i2Text = (doc.querySelector('#i2') || {}).textContent || '';
+
+        const origRes = origNode ? (origNode.textContent.match(/(\d+\s*x\s*\d+)/i) || [])[1] : null;
+        const shownRes = (i2Text.match(/(\d+\s*x\s*\d+)/i) || [])[1];
+        const sizeText = (i2Text.match(/::\s*([\d.]+\s*[KMG]B)/i) || [])[1];
+
+        return {
+            originalUrl: origNode ? origNode.href : null,
+            originalRes: origRes ? origRes.replace(/\s/g, '') : null,
+            displayUrl: displayImg ? displayImg.src : null,
+            displayRes: shownRes ? shownRes.replace(/\s/g, '') : null,
+            sizeText: sizeText || null,
+            fileExt: extFromViewerDoc(doc),
+            pageCount: (i2Text.match(/\d+\s*\/\s*(\d+)/) || [])[1]
+        };
+    }
+
+    /** Fetch + parse a /s/ page once; concurrent callers share one request. */
+    function loadViewerInfo(url) {
+        const hit = viewerPageCache.get(url);
+        if (hit) return Promise.resolve(hit);
+
+        const pending = viewerPageInflight.get(url);
+        if (pending) return pending;
+
+        const p = fetchDocument(url)
+            .then(doc => {
+                const info = parseViewerDoc(doc);
+                if (info.originalUrl || info.displayUrl) viewerPageCache.set(url, info);
+                return info;
+            })
+            .finally(() => viewerPageInflight.delete(url));
+
+        viewerPageInflight.set(url, p);
+        return p;
+    }
+    // =====================================================================
+    // === ANIMATED THUMBNAIL ENGINE =======================================
+    //
+    // Three problems with the previous governor, all fixed here:
+    //
+    //  1. It called getBoundingClientRect() inside a sort comparator and on
+    //     every scroll event, forcing synchronous layout O(n log n) times
+    //     per scroll. Positions are now measured once into a cache and
+    //     recomputed from scrollY alone.
+    //  2. Its pacing flag could swallow the "task finished" wake-up, leaving
+    //     the queue permanently stalled. Pacing is now a timestamp gate.
+    //  3. "Freezing" only toggled display:none, so thumbnails flickered
+    //     between the native sprite and the live image while scrolling. A
+    //     frozen thumbnail now shows a canvas holding its last frame, so the
+    //     picture never disappears and the animated decode really does stop.
+    // =====================================================================
+    const LiveThumbs = (() => {
+        const CONFIG = {
+            maxConcurrentFetch: 2,   // parallel /s/ page lookups
+            pacingMs: 320,           // minimum gap between lookups
+            playBudget: 4,           // thumbnails animating at once
+            mountBudget: 14,         // decoded <img> elements kept alive
+            evictDistanceVh: 2,      // drop the <img> past this many viewports
+            rootMargin: '300px 0px',
+            frozenFrameMax: 512      // cap for the still-frame canvas
+        };
+
+        const STATIC_EXTS = new Set(['jpg', 'jpeg', 'png', 'bmp', 'avif', 'heic']);
+        const ANIMATED_EXTS = new Set(['gif', 'webm', 'mp4', 'apng']);
+
+        const states = new Map();
+        const queue = [];
+        const active = new Set();
+
+        let enabled = false;
+        let io = null;
+        let pumpTimer = null;
+        let lastDispatch = 0;
+        let galleryIsAnimated = null;
+        let resizeTimer = null;
+        let pinnedState = null;
+
+        // ---------- gallery-level heuristics ----------
+        function detectGalleryAnimated() {
+            if (galleryIsAnimated !== null) return galleryIsAnimated;
+            const tags = $$('#taglist a').map(a => a.textContent.trim().toLowerCase());
+            const title = (document.title || '').toLowerCase();
+            const h1 = (($('h1') || {}).textContent || '').toLowerCase();
+            galleryIsAnimated =
+                tags.some(t => t === 'animated' || t === 'other:animated' ||
+                               t.includes('webanim') || t.includes('animated gif') ||
+                               t.includes('animated webp')) ||
+                /\[animated|\(animated/.test(title) ||
+                /\[animated|\(animated/.test(h1);
+            return galleryIsAnimated;
+        }
+
+        function classify(itemEl) {
+            const titled = itemEl.matches('[title]') ? itemEl : itemEl.querySelector('[title]');
+            const raw = titled ? (titled.getAttribute('title') || '') : '';
+            const name = (raw.match(/^Page\s+\d+:\s*(.+)$/i) || [null, raw])[1] || '';
+            const ext = ((name.match(/\.([a-z0-9]{2,5})$/i) || [])[1] || '').toLowerCase();
+
+            // Definitely static: never mount an <img>, keep the free CSS sprite.
+            if (STATIC_EXTS.has(ext)) return { isAnimated: false, ext };
+            if (ANIMATED_EXTS.has(ext)) return { isAnimated: true, ext };
+            // WebP is the ambiguous one; fall back to the gallery's own tags.
+            if (ext === 'webp') return { isAnimated: detectGalleryAnimated(), ext };
+            return { isAnimated: detectGalleryAnimated(), ext };
+        }
+
+        /** The element that actually paints the thumbnail, in any layout mode. */
+        function resolveThumbBox(itemEl) {
+            const titled = itemEl.matches('[title]') ? itemEl : itemEl.querySelector('[title]');
+            if (titled) return titled.tagName === 'IMG' ? (titled.parentElement || itemEl) : titled;
+            const bg = itemEl.querySelector('div[style*="background"]');
+            if (bg) return bg;
+            const img = itemEl.querySelector('img');
+            if (img) return img.parentElement || itemEl;
+            return itemEl.querySelector('a') || itemEl;
+        }
+
+        function resolveLink(itemEl) {
+            const a = itemEl.matches('a') ? itemEl : itemEl.querySelector('a[href*="/s/"]');
+            return a ? a.href : null;
+        }
+
+        // ---------- layout cache ----------
+        // One batched read pass. Nothing else in this module touches layout,
+        // so scrolling never forces a reflow.
+        function measureLayout() {
+            const scrollY = window.scrollY;
+            for (const st of states.values()) {
+                const r = st.element.getBoundingClientRect();
+                st.docTop = r.top + scrollY;
+                st.height = r.height || 1;
+            }
+        }
+
+        // ---------- status badge ----------
+        function renderStatus() {
+            const badge = $('#eh-anim-status');
+            if (!badge) return;
+            const busy = active.size;
+            const waiting = queue.length;
+            if (!busy && !waiting) { badge.style.display = 'none'; return; }
+
+            const pages = Array.from(active).map(s => s.index).sort((a, b) => a - b);
+            let label = 'Loading animation';
+            if (pages.length) label += ` · p.${pages.join(', ')}`;
+            if (waiting) label += ` · +${waiting} queued`;
+
+            badge.style.display = 'inline-flex';
+            badge.innerHTML = `<span class="eh-anim-spin-icon">⏳</span><span>🎬 ${label}</span>`;
+        }
+
+        // ---------- fetch queue ----------
+        function enqueue(st, front = false) {
+            if (!enabled || st.status !== 'idle') return;
+            st.status = 'queued';
+            // Score now, from the cached layout, so the very first batch is
+            // already ordered by distance rather than by document order.
+            // A hovered thumbnail jumps the queue outright; pump() re-sorts
+            // by distance, so "front" has to be expressed as a score that
+            // the budget pass will not overwrite on the next frame.
+            if (front) st.urgent = true;
+            st.dist = front
+                ? -1
+                : Math.abs((st.docTop + st.height / 2) - (window.scrollY + window.innerHeight / 2));
+            queue.push(st);
+            renderStatus();
+            pump();
+        }
+
+        function pump() {
+            if (!enabled || pumpTimer) return;
+            while (active.size < CONFIG.maxConcurrentFetch && queue.length) {
+                const wait = CONFIG.pacingMs - (performance.now() - lastDispatch);
+                if (wait > 0) {
+                    // Timestamp gate, not a boolean lock: a task completing
+                    // during the pause can never lose its wake-up.
+                    pumpTimer = setTimeout(() => { pumpTimer = null; pump(); }, wait);
+                    return;
+                }
+                queue.sort((a, b) => a.dist - b.dist);
+                const st = queue.shift();
+                if (!st) break;
+                lastDispatch = performance.now();
+                dispatch(st);
+            }
+        }
+
+        function showFetchIndicator(st, on) {
+            const box = st.box;
+            if (!box) return;
+            box.classList.toggle('eh-thumb-fetching', on);
+            if (on) {
+                if (!box.querySelector('.eh-thumb-spinner')) {
+                    const sp = document.createElement('div');
+                    sp.className = 'eh-thumb-spinner';
+                    sp.innerHTML = '<span class="eh-anim-spin-icon">⚙</span>Loading';
+                    box.appendChild(sp);
+                }
+            } else {
+                const sp = box.querySelector('.eh-thumb-spinner');
+                if (sp) sp.remove();
+            }
+        }
+
+        function dispatch(st) {
+            st.status = 'fetching';
+            st.urgent = false;   // the queue-jump only applied to the fetch
+            active.add(st);
+            renderStatus();
+            showFetchIndicator(st, true);
+
+            loadViewerInfo(st.pageUrl)
+                .then(info => {
+                    // The resampled view is animated too and costs far less
+                    // bandwidth and quota than pulling the original.
+                    st.src = info.displayUrl || info.originalUrl;
+                    st.status = st.src ? 'ready' : 'error';
+                    if (st.src) mount(st);
+                })
+                .catch(err => {
+                    st.status = 'error';
+                    if (err && err.kind === QUOTA_HALT) {
+                        // Stop burning requests the moment limits are hit,
+                        // but keep the thumbnails that already loaded.
+                        pause('Animation paused — image limit reached');
+                        Quota.refresh({ force: true });
+                    } else if (err && err.kind !== 'abort') {
+                        console.warn('[ExHD] live thumb lookup failed', st.pageUrl, err);
+                    }
+                })
+                .finally(() => {
+                    active.delete(st);
+                    showFetchIndicator(st, false);
+                    renderStatus();
+                    updateBudget();
+                    pump();
+                });
+        }
+
+        // ---------- element lifecycle ----------
+        function ensureLayer(st) {
+            if (st.layer) return st.layer;
+
+            // The grid markup differs between thumbnail sizes, so guarantee
+            // the containing block here rather than trusting a selector to
+            // have matched this particular layout.
+            const boxStyle = getComputedStyle(st.box);
+            if (boxStyle.position === 'static') st.box.style.position = 'relative';
+            if (boxStyle.overflow === 'visible') st.box.style.overflow = 'hidden';
+
+            const layer = document.createElement('div');
+            layer.className = 'eh-live-layer';
+
+            const img = document.createElement('img');
+            img.decoding = 'async';
+            img.alt = '';
+            const canvas = document.createElement('canvas');
+
+            layer.append(img, canvas);
+            st.box.appendChild(layer);
+
+            st.layer = layer;
+            st.img = img;
+            st.canvas = canvas;
+
+            if (!st.box.querySelector('.eh-anim-badge')) {
+                const badge = document.createElement('div');
+                badge.className = 'eh-anim-badge';
+                badge.textContent = (st.ext || 'anim').toUpperCase().slice(0, 4);
+                st.box.appendChild(badge);
+                st.badge = badge;
+            }
+            return layer;
+        }
+
+        /** Load and decode before showing, so a thumbnail never flashes half-painted. */
+        function mount(st) {
+            if (!enabled || !st.src || st.mounting) return Promise.resolve();
+            ensureLayer(st);
+            if (st.mounted) return Promise.resolve();
+
+            st.mounting = true;
+            st.img.src = st.src;
+
+            const decoded = st.img.decode
+                ? st.img.decode()
+                : new Promise((res, rej) => { st.img.onload = res; st.img.onerror = rej; });
+
+            return decoded.then(() => {
+                st.mounted = true;
+                st.mounting = false;
+                st.layer.classList.add('is-shown');
+                updateBudget();
+            }).catch(() => {
+                st.mounting = false;
+                st.status = 'error';
+            });
+        }
+
+        /** Snapshot the current frame so freezing never blanks the thumbnail. */
+        function captureFrame(st) {
+            if (!st.mounted || !st.img.naturalWidth) return false;
+            const { naturalWidth: nw, naturalHeight: nh } = st.img;
+            const scale = Math.min(1, CONFIG.frozenFrameMax / Math.max(nw, nh));
+            const w = Math.max(1, Math.round(nw * scale));
+            const h = Math.max(1, Math.round(nh * scale));
+            try {
+                if (st.canvas.width !== w) st.canvas.width = w;
+                if (st.canvas.height !== h) st.canvas.height = h;
+                const ctx = st.canvas.getContext('2d');
+                ctx.drawImage(st.img, 0, 0, w, h);
+                st.hasFrame = true;
+                return true;
+            } catch {
+                // Cross-origin draws are allowed; only readback would throw.
+                return false;
+            }
+        }
+
+        function play(st) {
+            if (!st.mounted) { mount(st); return; }
+            if (st.playing) return;
+            st.playing = true;
+            st.layer.classList.remove('is-frozen');
+            if (st.badge) st.badge.classList.remove('is-frozen');
+        }
+
+        function freeze(st) {
+            if (!st.layer) return;
+            if (st.playing || !st.hasFrame) captureFrame(st);
+            if (!st.hasFrame) return;      // nothing to show yet; keep playing
+            st.playing = false;
+            st.layer.classList.add('is-frozen');
+            if (st.badge) st.badge.classList.add('is-frozen');
+        }
+
+        /** Release decoded animation frames while keeping the still visible. */
+        function evict(st) {
+            if (!st.layer || !st.mounted) return;
+            if (!st.hasFrame && !captureFrame(st)) return;
+            freeze(st);
+            st.mounted = false;
+            st.playing = false;
+            st.img.removeAttribute('src');
+        }
+
+        // ---------- budget governor ----------
+        const updateBudget = rafThrottle(() => {
+            if (!enabled) return;
+
+            const vh = window.innerHeight;
+            const sy = window.scrollY;
+            const viewCenter = sy + vh / 2;
+            const evictBeyond = vh * CONFIG.evictDistanceVh;
+
+            const ready = [];
+            for (const st of states.values()) {
+                if (!st.isAnimated) continue;
+                const center = st.docTop + st.height / 2;
+                st.dist = st.urgent ? -1 : Math.abs(center - viewCenter);
+                st.inView = st.docTop < sy + vh && st.docTop + st.height > sy;
+                if (st.status === 'ready') ready.push(st);
+            }
+
+            ready.sort((a, b) => a.dist - b.dist);
+
+            let playing = 0;
+            let mounted = 0;
+            for (const st of ready) {
+                if (st.pinned || (st.inView && playing < CONFIG.playBudget)) {
+                    play(st);
+                    playing++;
+                    mounted++;
+                } else if (mounted < CONFIG.mountBudget && st.dist < evictBeyond) {
+                    freeze(st);
+                    mounted++;
+                } else {
+                    evict(st);
+                }
             }
         });
+
+        const onScroll = () => updateBudget();
+
+        function onResize() {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(() => { measureLayout(); updateBudget(); }, 200);
+        }
+
+        // Hover promotes a thumbnail past the budget, via one delegated
+        // listener rather than one per grid item.
+        function onPointerOver(e) {
+            if (!enabled) return;
+            const item = e.target.closest ? e.target.closest('#gdt > *') : null;
+            if (!item) return;
+            const st = states.get(item);
+            if (!st || !st.isAnimated) return;
+
+            if (st.status === 'idle') { enqueue(st, true); return; }
+            if (st.status !== 'ready') return;
+
+            if (pinnedState && pinnedState !== st) pinnedState.pinned = false;
+            pinnedState = st;
+            st.pinned = true;
+            updateBudget();
+        }
+
+        function onPointerOut(e) {
+            if (!enabled || !pinnedState) return;
+            const item = e.target.closest ? e.target.closest('#gdt > *') : null;
+            if (item && states.get(item) === pinnedState) {
+                pinnedState.pinned = false;
+                pinnedState = null;
+                updateBudget();
+            }
+        }
+
+        // ---------- public API ----------
+        function enable() {
+            const gdt = $('#gdt');
+            if (!gdt || enabled) return;
+            enabled = true;
+
+            Array.from(gdt.children).forEach((itemEl, idx) => {
+                const box = resolveThumbBox(itemEl);
+                const pageUrl = resolveLink(itemEl);
+                const { isAnimated, ext } = classify(itemEl);
+
+                states.set(itemEl, {
+                    index: idx + 1, element: itemEl, box, pageUrl,
+                    isAnimated: isAnimated && !!pageUrl && !!box, ext,
+                    status: 'idle', src: null,
+                    layer: null, img: null, canvas: null, badge: null,
+                    mounted: false, mounting: false, playing: false,
+                    hasFrame: false, pinned: false, urgent: false,
+                    docTop: 0, height: 1, dist: Infinity, inView: false
+                });
+            });
+
+            measureLayout();
+
+            io = new IntersectionObserver(entries => {
+                for (const entry of entries) {
+                    const st = states.get(entry.target);
+                    if (!st || !st.isAnimated) continue;
+                    if (entry.isIntersecting && st.status === 'idle') enqueue(st);
+                }
+                updateBudget();
+            }, { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
+
+            for (const st of states.values()) {
+                if (st.isAnimated) io.observe(st.element);
+            }
+
+            window.addEventListener('scroll', onScroll, { passive: true });
+            window.addEventListener('resize', onResize, { passive: true });
+            gdt.addEventListener('pointerover', onPointerOver, { passive: true });
+            gdt.addEventListener('pointerout', onPointerOut, { passive: true });
+
+            updateBudget();
+            renderStatus();
+        }
+
+        function disable({ keepSetting = false } = {}) {
+            if (!enabled) return;
+            enabled = false;
+
+            if (io) { io.disconnect(); io = null; }
+            clearTimeout(pumpTimer); pumpTimer = null;
+            clearTimeout(resizeTimer); resizeTimer = null;
+            queue.length = 0;
+            active.clear();
+
+            window.removeEventListener('scroll', onScroll);
+            window.removeEventListener('resize', onResize);
+            const gdt = $('#gdt');
+            if (gdt) {
+                gdt.removeEventListener('pointerover', onPointerOver);
+                gdt.removeEventListener('pointerout', onPointerOut);
+            }
+
+            $$('.eh-live-layer, .eh-anim-badge, .eh-thumb-spinner').forEach(el => el.remove());
+            $$('.eh-thumb-fetching').forEach(el => el.classList.remove('eh-thumb-fetching'));
+
+            states.clear();
+            pinnedState = null;
+            if (!keepSetting) renderStatus();
+        }
+
+        /**
+         * Stop fetching more images but leave everything already on screen
+         * alone. Used when the account hits its image limit: tearing the
+         * whole grid down would throw away work that cost quota to load.
+         */
+        function pause(reason) {
+            queue.forEach(st => { st.status = 'idle'; });
+            queue.length = 0;
+            clearTimeout(pumpTimer);
+            pumpTimer = null;
+            if (io) { io.disconnect(); io = null; }
+
+            const badge = $('#eh-anim-status');
+            if (badge) {
+                badge.style.display = 'inline-flex';
+                badge.innerHTML = `<span>⚠ ${reason}</span>`;
+            }
+        }
+
+        function countAnimatedCandidates() {
+            const gdt = $('#gdt');
+            if (!gdt) return 0;
+            let n = 0;
+            for (const item of gdt.children) if (classify(item).isAnimated) n++;
+            return n;
+        }
+
+        return { enable, disable, countAnimatedCandidates, get isEnabled() { return enabled; } };
+    })();
+    // =====================================================================
+    // === DOWNLOAD QUEUE ==================================================
+    // =====================================================================
+    const PAGE_RE = /\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/;
+
+    function setBtn(btn, state, text, title) {
+        if (!btn) return;
+        btn.className = 'eh-dl-btn' + (state ? ' state-' + state : '');
+        btn.textContent = text;
+        btn.title = title || '';
+        if (state !== 'dl') btn.style.removeProperty('--eh-pct');
     }
 
-    function initIdlePolling() {
-        startIdleTimer();
-        document.addEventListener('visibilitychange', () => {
-            if (!document.hidden && !isProcessing) fetchImageLimits();
-            else updateTimerDisplay();
+    const DownloadQueue = (() => {
+        const pending = [];
+        const failures = new Map();      // pageNum -> task
+        let current = null;
+        let activeReq = null;
+        let running = false;
+        let halted = false;
+
+        let completed = 0;
+        let failedCount = 0;
+        let totalAdded = 0;
+        let bytesThisRun = 0;
+        let runStartedAt = 0;
+
+        let ui = null;
+
+        const isBusy = () => running || pending.length > 0;
+
+        // ---------- manager UI ----------
+        function buildManager() {
+            const el = document.createElement('div');
+            el.id = 'eh-dl-manager';
+            el.innerHTML = `
+                <div class="eh-mgr-header" id="eh-mgr-drag">
+                    <span>Download Manager</span>
+                    <div class="eh-mgr-header-actions">
+                        <span id="eh-mgr-count">0 queued</span>
+                        <button type="button" id="eh-mgr-min" class="eh-mgr-min-btn" title="Collapse">–</button>
+                        <button type="button" id="eh-mgr-stop-all" class="eh-mgr-stop-btn">✕ Cancel All</button>
+                    </div>
+                </div>
+                <div class="eh-mgr-body">
+                    <div id="eh-mgr-title" class="eh-mgr-title">Idle</div>
+                    <div class="eh-progress-bg">
+                        <div id="eh-progress-fill" class="eh-progress-fill"></div>
+                        <div id="eh-progress-text" class="eh-progress-text">0%</div>
+                    </div>
+                    <div class="eh-mgr-stats">
+                        <span id="eh-mgr-quota">Quota: …</span>
+                        <span id="eh-mgr-rate"></span>
+                        <span id="eh-mgr-total">0 / 0</span>
+                    </div>
+                    <div id="eh-mgr-alert" class="eh-mgr-alert"></div>
+                    <div id="eh-mgr-queue-list" class="eh-mgr-queue-list"></div>
+                </div>`;
+            document.body.appendChild(el);
+
+            ui = {
+                root: el,
+                title: $('#eh-mgr-title', el),
+                fill: $('#eh-progress-fill', el),
+                pct: $('#eh-progress-text', el),
+                count: $('#eh-mgr-count', el),
+                total: $('#eh-mgr-total', el),
+                rate: $('#eh-mgr-rate', el),
+                alert: $('#eh-mgr-alert', el),
+                list: $('#eh-mgr-queue-list', el)
+            };
+
+            $('#eh-mgr-stop-all', el).addEventListener('click', cancelAll);
+            $('#eh-mgr-min', el).addEventListener('click', () => {
+                el.classList.toggle('collapsed');
+                setSetting('eh_mgr_collapsed', el.classList.contains('collapsed'));
+            });
+            if (getSetting('eh_mgr_collapsed', false)) el.classList.add('collapsed');
+
+            makeDraggable(el, $('#eh-mgr-drag', el));
+            return el;
+        }
+
+        function makeDraggable(el, handle) {
+            const saved = getSetting('eh_mgr_pos', '');
+            if (saved) {
+                const [x, y] = String(saved).split(',').map(Number);
+                if (!isNaN(x) && !isNaN(y)) {
+                    el.style.left = clamp(x, 0, Math.max(0, innerWidth - 80)) + 'px';
+                    el.style.top = clamp(y, 0, Math.max(0, innerHeight - 40)) + 'px';
+                    el.style.right = 'auto';
+                    el.style.bottom = 'auto';
+                }
+            }
+
+            let dragging = false;
+            let offX = 0;
+            let offY = 0;
+
+            handle.addEventListener('pointerdown', e => {
+                if (e.target.closest('button')) return;
+                dragging = true;
+                const r = el.getBoundingClientRect();
+                offX = e.clientX - r.left;
+                offY = e.clientY - r.top;
+                handle.setPointerCapture(e.pointerId);
+            });
+
+            handle.addEventListener('pointermove', rafThrottle(e => {
+                if (!dragging) return;
+                const x = clamp(e.clientX - offX, 0, innerWidth - el.offsetWidth);
+                const y = clamp(e.clientY - offY, 0, innerHeight - 40);
+                el.style.left = x + 'px';
+                el.style.top = y + 'px';
+                el.style.right = 'auto';
+                el.style.bottom = 'auto';
+            }));
+
+            handle.addEventListener('pointerup', e => {
+                if (!dragging) return;
+                dragging = false;
+                handle.releasePointerCapture(e.pointerId);
+                setSetting('eh_mgr_pos', `${parseInt(el.style.left, 10)},${parseInt(el.style.top, 10)}`);
+            });
+        }
+
+        function showAlert(msg) {
+            if (!ui) return;
+            ui.alert.textContent = msg;
+            ui.alert.classList.add('is-shown');
+        }
+
+        function clearAlert() {
+            if (ui) ui.alert.classList.remove('is-shown');
+        }
+
+        function setProgress(pct, loaded, total) {
+            if (!ui) return;
+            const p = clamp(Math.round(pct), 0, 100);
+            ui.fill.style.width = p + '%';
+            ui.pct.textContent = loaded != null && total
+                ? `${p}%  ·  ${formatBytes(loaded)} / ${formatBytes(total)}`
+                : p + '%';
+        }
+
+        const renderUI = rafThrottle(() => {
+            if (!ui) return;
+            const busy = isBusy();
+            const topCancel = $('#eh-cancel-all-btn');
+            if (topCancel) topCancel.style.display = busy ? 'inline-flex' : 'none';
+            const topRetry = $('#eh-retry-btn');
+            if (topRetry) topRetry.style.display = failures.size ? 'inline-flex' : 'none';
+
+            ui.root.classList.toggle('active', busy || failures.size > 0);
+            if (!busy && !failures.size) return;
+
+            ui.count.textContent = `${pending.length} queued`;
+            ui.total.textContent = `${completed} / ${totalAdded}` + (failedCount ? ` · ${failedCount} failed` : '');
+
+            if (running && runStartedAt && bytesThisRun > 0) {
+                const secs = (performance.now() - runStartedAt) / 1000;
+                const rate = bytesThisRun / secs;
+                const left = pending.length + (current ? 1 : 0);
+                const avg = bytesThisRun / Math.max(1, completed || 1);
+                ui.rate.textContent = `${formatBytes(rate)}/s · ~${formatDuration((left * avg) / Math.max(rate, 1))}`;
+            } else {
+                ui.rate.textContent = '';
+            }
+
+            ui.list.textContent = '';
+            const rows = [];
+            for (const task of failures.values()) rows.push({ task, failed: true });
+            for (const task of pending.slice(0, 8)) rows.push({ task, failed: false });
+
+            for (const { task, failed } of rows.slice(0, 10)) {
+                const row = document.createElement('div');
+                row.className = 'eh-mgr-queue-item' + (failed ? ' is-failed' : '');
+                const label = document.createElement('span');
+                label.textContent = failed ? `Page ${task.pageNum} — ${task.error || 'failed'}` : `Page ${task.pageNum}`;
+                const action = document.createElement('span');
+                action.className = 'eh-queue-item-remove';
+                action.textContent = failed ? '↻' : '✕';
+                action.title = failed ? 'Retry' : 'Remove from queue';
+                action.addEventListener('click', ev => {
+                    ev.stopPropagation();
+                    if (failed) { failures.delete(task.pageNum); push(task); }
+                    else remove(task.pageNum);
+                });
+                row.append(label, action);
+                ui.list.appendChild(row);
+            }
+
+            if (pending.length > 8) {
+                const more = document.createElement('div');
+                more.className = 'eh-mgr-queue-item';
+                more.style.fontStyle = 'italic';
+                more.textContent = `…and ${pending.length - 8} more`;
+                ui.list.appendChild(more);
+            }
         });
+
+        // ---------- queue operations ----------
+        function restoreBtn(task) {
+            const gid = task.galleryId || getGalleryIdFromLocation();
+            if (History.isSaved(gid, task.pageNum)) {
+                const meta = History.forGallery(gid)[String(task.pageNum)] || {};
+                setBtn(task.btn, 'saved', '✓ Saved',
+                    `Downloaded ${new Date(meta.time).toLocaleDateString()}. Click to re-download.`);
+            } else {
+                setBtn(task.btn, '', '⬇ Download');
+            }
+        }
+
+        function push(task) {
+            if (halted) return;
+            if (current && current.pageNum === task.pageNum) return;
+            if (pending.some(t => t.pageNum === task.pageNum)) return;
+
+            if (failures.delete(task.pageNum)) failedCount = Math.max(0, failedCount - 1);
+            task.error = null;
+            setBtn(task.btn, 'queued', '⏳ Queued ✕', 'Click to remove from queue');
+            pending.push(task);
+            totalAdded++;
+            renderUI();
+            run();
+        }
+
+        function remove(pageNum) {
+            const i = pending.findIndex(t => t.pageNum === pageNum);
+            if (i === -1) return;
+            const [task] = pending.splice(i, 1);
+            restoreBtn(task);
+            renderUI();
+        }
+
+        function cancelAll() {
+            halted = false;
+            clearAlert();
+            if (activeReq) { try { activeReq.abort(); } catch { /* already done */ } }
+            activeReq = null;
+
+            if (current) { restoreBtn(current); current = null; }
+            pending.forEach(restoreBtn);
+            pending.length = 0;
+            failures.clear();
+            failedCount = 0;
+
+            running = false;
+            setProgress(0);
+            if (ui) ui.title.textContent = 'Cancelled';
+            Quota.renderTimer();
+            renderUI();
+        }
+
+        function haltForQuota(message) {
+            halted = true;
+            pending.forEach(restoreBtn);
+            pending.length = 0;
+            showAlert(`${message} Downloads stopped. The counter above refreshes automatically — resume when it recovers.`);
+            Quota.refresh({ force: true });
+        }
+
+        function run() {
+            if (running || halted || !pending.length) return;
+            running = true;
+            if (!runStartedAt) runStartedAt = performance.now();
+            Quota.renderTimer();
+
+            current = pending.shift();
+            renderUI();
+
+            processTask(current).then(outcome => {
+                if (outcome === 'ok') completed++;
+                running = false;
+                current = null;
+                activeReq = null;
+                renderUI();
+                Quota.renderTimer();
+
+                if (outcome === 'quota') return;      // haltForQuota already ran
+                // Refresh the counter beside the next download, not before it.
+                Quota.refresh();
+                if (!pending.length) {
+                    runStartedAt = 0;
+                    bytesThisRun = 0;
+                    if (ui) ui.title.textContent = failedCount ? `Finished with ${failedCount} failure(s)` : 'All downloads finished';
+                }
+                run();
+            });
+        }
+
+        async function processTask(task) {
+            const { viewerUrl, pageNum, btn } = task;
+            const galleryId = task.galleryId || getGalleryIdFromLocation();
+
+            setBtn(btn, 'scan', '⟳ Searching…');
+            if (ui) ui.title.textContent = `Page ${pageNum} — resolving source…`;
+            setProgress(0);
+
+            try {
+                const info = await withRetry(() => loadViewerInfo(viewerUrl), {
+                    attempts: 3,
+                    onRetry: n => setBtn(btn, 'scan', `⟳ Retry ${n}…`)
+                });
+
+                const targetUrl = info.originalUrl || info.displayUrl;
+                if (!targetUrl) throw new EhError('parse', 'No image source on page');
+
+                const isOriginal = !!info.originalUrl;
+                const resLabel = (isOriginal ? info.originalRes : info.displayRes) ||
+                                 (isOriginal ? 'original' : 'resampled');
+                const label = isOriginal ? resLabel : `${resLabel} [resampled]`;
+
+                setBtn(btn, 'dl', '↓ 0%');
+                if (ui) ui.title.textContent = `Page ${pageNum} · ${label}`;
+
+                let lastLoaded = 0;
+                const onprogress = p => {
+                    if (!p.lengthComputable) return;
+                    bytesThisRun += Math.max(0, p.loaded - lastLoaded);
+                    lastLoaded = p.loaded;
+                    const pct = Math.round((p.loaded / p.total) * 100);
+                    btn.style.setProperty('--eh-pct', pct + '%');
+                    btn.textContent = `↓ ${pct}%`;
+                    setProgress(pct, p.loaded, p.total);
+                };
+
+                const { blob, res } = await withRetry(
+                    () => fetchImageBlob(targetUrl, {
+                        referer: viewerUrl,
+                        onprogress,
+                        onHandle: req => { activeReq = req; }
+                    }),
+                    { attempts: 3, onRetry: n => setBtn(btn, 'dl', `↻ Retry ${n}…`) }
+                );
+
+                const ext = (await sniffExtension(blob)) ||
+                            extFromContentType(res.responseHeaders) ||
+                            info.fileExt ||
+                            extFromUrl(targetUrl) ||
+                            'jpg';
+
+                const pad = padWidthFor(getGalleryPageCount());
+                const filename = `${getGalleryTitle()} - ${String(pageNum).padStart(pad, '0')}.${ext}`;
+                saveBlob(blob, filename);
+
+                const sizeText = formatBytes(blob.size);
+                History.mark(galleryId, pageNum, { res: label, size: sizeText });
+                refreshGallerySavedStats();
+
+                setBtn(btn, 'saved', `✓ Saved ${sizeText}`,
+                    `Downloaded ${new Date().toLocaleDateString()} · ${label}. Click to re-download.`);
+                setProgress(100);
+                return 'ok';
+
+            } catch (err) {
+                if (err && err.kind === 'abort') { restoreBtn(task); return 'abort'; }
+
+                if (err && err.kind === QUOTA_HALT) {
+                    setBtn(btn, 'err', '⚠ Limit');
+                    task.error = 'image limit';
+                    failures.set(pageNum, task);
+                    failedCount++;
+                    haltForQuota(err.message + '.');
+                    return 'quota';
+                }
+
+                const msg = err && err.kind === 'timeout' ? 'timeout'
+                          : err && err.kind === 'http' ? `HTTP ${err.detail}`
+                          : err && err.kind === 'parse' ? 'no source'
+                          : 'network';
+                task.error = msg;
+                failures.set(pageNum, task);
+                failedCount++;
+                setBtn(btn, 'err', `✕ ${msg}`, 'Failed — click to try again');
+                console.warn('[ExHD] download failed', viewerUrl, err);
+                return 'fail';
+            }
+        }
+
+        function retryAllFailed() {
+            const tasks = Array.from(failures.values());
+            failures.clear();
+            failedCount = 0;
+            halted = false;
+            clearAlert();
+            tasks.forEach(push);
+        }
+
+        return {
+            init: buildManager,
+            push, remove, cancelAll, retryAllFailed, renderUI,
+            get isBusy() { return isBusy(); },
+            get failedCount() { return failedCount; },
+            get pendingCount() { return pending.length; }
+        };
+    })();
+
+    // =====================================================================
+    // === GALLERY PAGE (/g/*) =============================================
+    // =====================================================================
+    function refreshGallerySavedStats() {
+        const gid = getGalleryIdFromLocation();
+        if (!gid) return;
+
+        const saved = History.forGallery(gid);
+        const count = Object.keys(saved).length;
+
+        const badge = $('#eh-saved-stats');
+        if (badge) {
+            badge.innerHTML = `Saved: <b>${count}</b> / ${$$('#gdt a[href*="/s/"]').length}`;
+            badge.style.display = count > 0 ? 'inline-flex' : 'none';
+        }
+
+        for (const link of $$('#gdt a[href*="/s/"]')) {
+            const btn = link.querySelector('.eh-dl-btn');
+            if (!btn) continue;
+            if (/state-(queued|scan|dl|err)/.test(btn.className)) continue;
+
+            const m = link.href.match(PAGE_RE);
+            if (!m) continue;
+            const page = m[2];
+
+            if (saved[page]) {
+                setBtn(btn, 'saved', '✓ Saved',
+                    `Downloaded ${new Date(saved[page].time).toLocaleDateString()}. Click to re-download.`);
+            } else if (btn.classList.contains('state-saved')) {
+                setBtn(btn, '', '⬇ Download');
+            }
+        }
     }
 
     function applyNewTabBehavior(on) {
-        document.querySelectorAll('#gdt a, .gl1t a, .gl2t a, .gl3m a, .gl1e a').forEach(a => {
+        for (const a of $$('#gdt a, .gl1t a, .gl2t a, .gl3m a, .gl1e a, .glname a, .gl4t a')) {
             if (on) {
                 a.setAttribute('target', '_blank');
                 a.setAttribute('rel', 'noopener noreferrer');
@@ -935,1106 +2018,825 @@
                 a.removeAttribute('target');
                 a.removeAttribute('rel');
             }
-        });
+        }
     }
 
-    // === Smart Cursor-Following Popup Positioner ===
-    function positionPopupAtCursor(popup, clientX, clientY, expectedWidth, expectedHeight) {
-        const pad = 16;
-        let left = clientX + pad;
-        let top = clientY + pad;
-
-        const w = expectedWidth || popup.offsetWidth || 470;
-        const h = expectedHeight || popup.offsetHeight || 380;
-
-        if (left + w > window.innerWidth - 12) {
-            left = clientX - w - pad;
-        }
-        if (left < 12) left = 12;
-
-        if (top + h > window.innerHeight - 12) {
-            top = clientY - h - pad;
-        }
-        if (top < 12) top = 12;
-
-        popup.style.left = `${Math.round(left)}px`;
-        popup.style.top = `${Math.round(top)}px`;
-    }
-
-    // =============================================
-    // === 1. GALLERY PAGE MODE (/g/*) ===
-    // =============================================
-    let managerEl, currentTaskEl, progressBarEl, progressTextEl, queueListEl, queueCountEl, topCancelBtnEl;
-    const imagePreviewCache = new Map();
-
-    function refreshGallerySavedStats() {
+    function collectPageTasks({ onlyMissing }) {
         const gid = getGalleryIdFromLocation();
-        if (!gid) return;
+        const saved = History.forGallery(gid);
+        const tasks = [];
 
-        const downloadedMap = getGalleryDownloadedMap(gid);
-        const count = Object.keys(downloadedMap).length;
+        for (const link of $$('#gdt a[href*="/s/"]')) {
+            const m = link.href.match(PAGE_RE);
+            if (!m) continue;
+            const pageNum = m[2];
+            if (onlyMissing && saved[pageNum]) continue;
 
-        const statBadge = document.querySelector('#eh-saved-stats');
-        if (statBadge) {
-            statBadge.innerHTML = `Saved: <b>${count}</b> pages`;
-            statBadge.style.display = count > 0 ? 'inline-flex' : 'none';
-        }
-
-        document.querySelectorAll('#gdt a').forEach(link => {
             const btn = link.querySelector('.eh-dl-btn');
-            if (!btn) return;
-            if (btn.classList.contains('state-queued') || btn.classList.contains('state-scan') || btn.classList.contains('state-dl')) return;
+            if (!btn || /state-(queued|scan|dl)/.test(btn.className)) continue;
 
-            const m = link.href.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
-            if (m) {
-                const p = m[2];
-                if (downloadedMap[p]) {
-                    btn.className = 'eh-dl-btn state-saved';
-                    btn.innerText = '✓ Saved';
-                    btn.title = `Downloaded on ${new Date(downloadedMap[p].time).toLocaleDateString()}. Click to re-download.`;
-                } else if (btn.classList.contains('state-saved')) {
-                    btn.className = 'eh-dl-btn';
-                    btn.innerText = '⬇ Download';
-                    btn.title = '';
-                }
-            }
-        });
+            tasks.push({ viewerUrl: link.href, galleryId: m[1] || gid, pageNum, btn });
+        }
+        return tasks;
     }
 
-    function createControlBarUI() {
-        const gdt = document.querySelector('#gdt');
-        if (!gdt) return;
-        const openInNewTab = getSetting('eh_open_in_new_tab', true);
+    function downloadAllOnPage() {
+        let tasks = collectPageTasks({ onlyMissing: true });
+        if (!tasks.length) {
+            const all = collectPageTasks({ onlyMissing: false });
+            if (!all.length) return;
+            // The old build silently re-downloaded everything here. Ask first.
+            if (!confirm(`Every image on this page is already saved.\n\nRe-download all ${all.length} of them?`)) return;
+            tasks = all;
+        }
+        tasks.forEach(DownloadQueue.push);
+    }
+
+    function buildGalleryBar() {
+        const gdt = $('#gdt');
+        if (!gdt || $('#eh-top-control-bar')) return;
+
+        const openNewTab = getSetting('eh_open_in_new_tab', true);
+        const liveThumbs = getSetting('eh_live_thumbs', false);
+        const animCount = LiveThumbs.countAnimatedCandidates();
 
         const bar = document.createElement('div');
         bar.id = 'eh-top-control-bar';
         bar.innerHTML = `
             <div class="eh-top-left">
-                <button id="eh-batch-dl-btn" class="eh-top-btn" title="Download all un-downloaded items on page (or all if all downloaded)">⬇ Download on Page</button>
-                <button id="eh-cancel-all-btn" class="eh-top-btn eh-btn-danger" style="display:none;">✕ Cancel All</button>
-                <label class="eh-checkbox-label" title="Controls whether clicking thumbnails opens them in a new tab">
-                    <input type="checkbox" id="eh-setting-new-tab" ${openInNewTab ? 'checked' : ''}>
-                    <span>Open in new tab</span>
+                <button type="button" id="eh-batch-dl-btn" class="eh-top-btn"
+                        title="Queue every image on this page that is not saved yet">⬇ Download page</button>
+                <button type="button" id="eh-retry-btn" class="eh-top-btn eh-btn-warn" style="display:none;">↻ Retry failed</button>
+                <button type="button" id="eh-cancel-all-btn" class="eh-top-btn eh-btn-danger" style="display:none;">✕ Cancel all</button>
+                <label class="eh-checkbox-label${openNewTab ? ' is-on' : ''}" title="Open thumbnails in a new tab">
+                    <input type="checkbox" id="eh-setting-new-tab" ${openNewTab ? 'checked' : ''}>
+                    <span>New tab</span>
                 </label>
-                <div class="eh-hint-badge" title="Hold Ctrl and hover over any thumbnail to preview full animated image">
-                    <kbd>Ctrl</kbd> + Hover = 🔍 Preview
+                <label class="eh-checkbox-label${liveThumbs ? ' is-on' : ''}"
+                       title="Play animated GIF/WebP images inside the grid. Loading them counts towards your image limit.">
+                    <input type="checkbox" id="eh-setting-live-thumbs" ${liveThumbs ? 'checked' : ''}>
+                    <span>🎬 Animated thumbs${animCount ? ` (${animCount})` : ''}</span>
+                </label>
+                <div id="eh-anim-status" class="eh-badge eh-anim-status-badge" style="display:none;"></div>
+                <div class="eh-badge eh-hint-badge" title="Hold Ctrl and hover a thumbnail for a full preview">
+                    <kbd>Ctrl</kbd> + hover = 🔍
                 </div>
-                <div id="eh-saved-stats" class="eh-saved-count-badge" style="display:none;">
-                    Saved: <b>0</b> pages
-                </div>
-                <div class="eh-quota-badge">
-                    <span id="eh-quota-value">Image Limits: <i>Checking...</i></span>
+                <div id="eh-saved-stats" class="eh-badge eh-saved-count-badge" style="display:none;"></div>
+                <div class="eh-badge eh-quota-badge">
+                    <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
                     <span id="eh-quota-timer" class="eh-timer-badge">⏱ 60s</span>
                 </div>
             </div>
-            <div class="eh-top-right">ExH Downloader v13.3</div>
-        `;
+            <div class="eh-top-right">
+                <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer" title="Project page">ExH Downloader v${VERSION}</a>
+            </div>`;
         gdt.parentNode.insertBefore(bar, gdt);
 
-        bar.querySelector('#eh-batch-dl-btn').addEventListener('click', downloadAllVisible);
-        topCancelBtnEl = bar.querySelector('#eh-cancel-all-btn');
-        topCancelBtnEl.addEventListener('click', cancelAllTasks);
+        $('#eh-batch-dl-btn', bar).addEventListener('click', downloadAllOnPage);
+        $('#eh-cancel-all-btn', bar).addEventListener('click', DownloadQueue.cancelAll);
+        $('#eh-retry-btn', bar).addEventListener('click', DownloadQueue.retryAllFailed);
 
-        const cb = bar.querySelector('#eh-setting-new-tab');
-        cb.addEventListener('change', e => {
+        const newTabCb = $('#eh-setting-new-tab', bar);
+        newTabCb.addEventListener('change', e => {
             setSetting('eh_open_in_new_tab', e.target.checked);
+            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
             applyNewTabBehavior(e.target.checked);
         });
 
-        applyNewTabBehavior(openInNewTab);
-        refreshGallerySavedStats();
-    }
-
-    function createManagerUI() {
-        managerEl = document.createElement('div');
-        managerEl.id = 'eh-dl-manager';
-        managerEl.innerHTML = `
-            <div class="eh-mgr-header">
-                <span>Download Manager</span>
-                <div class="eh-mgr-header-actions">
-                    <span id="eh-mgr-count">0 queued</span>
-                    <button id="eh-mgr-stop-all" class="eh-mgr-stop-btn">✕ Cancel All</button>
-                </div>
-            </div>
-            <div class="eh-mgr-body">
-                <div id="eh-mgr-title" class="eh-mgr-title">Idle...</div>
-                <div class="eh-progress-bg">
-                    <div id="eh-progress-fill" class="eh-progress-fill"></div>
-                    <div id="eh-progress-text" class="eh-progress-text">0%</div>
-                </div>
-                <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:10px;color:#888;">
-                    <span id="eh-mgr-quota">Quota: ...</span>
-                    <span id="eh-mgr-total-progress">Processed: 0/0</span>
-                </div>
-                <div id="eh-mgr-queue-list" class="eh-mgr-queue-list"></div>
-            </div>
-        `;
-        document.body.appendChild(managerEl);
-
-        currentTaskEl  = managerEl.querySelector('#eh-mgr-title');
-        progressBarEl  = managerEl.querySelector('#eh-progress-fill');
-        progressTextEl = managerEl.querySelector('#eh-progress-text');
-        queueListEl    = managerEl.querySelector('#eh-mgr-queue-list');
-        queueCountEl   = managerEl.querySelector('#eh-mgr-count');
-
-        managerEl.querySelector('#eh-mgr-stop-all').addEventListener('click', cancelAllTasks);
-    }
-
-    function updateManagerUI() {
-        const hasWork = downloadQueue.length > 0 || isProcessing;
-        if (topCancelBtnEl) topCancelBtnEl.style.display = hasWork ? 'inline-flex' : 'none';
-
-        if (!hasWork) {
-            managerEl.classList.remove('active');
-            return;
-        }
-
-        managerEl.classList.add('active');
-        queueCountEl.innerText = `${downloadQueue.length} queued`;
-
-        const tp = managerEl.querySelector('#eh-mgr-total-progress');
-        if (tp) tp.innerText = `Processed: ${completedCount}/${totalAddedTasks}`;
-
-        queueListEl.innerHTML = '';
-        downloadQueue.slice(0, 6).forEach(item => {
-            const div = document.createElement('div');
-            div.className = 'eh-mgr-queue-item';
-            div.innerHTML = `<span>Page ${item.pageNum}</span><span class="eh-queue-item-remove" title="Remove">✕</span>`;
-            div.querySelector('.eh-queue-item-remove').addEventListener('click', e => {
-                e.stopPropagation();
-                removeFromQueue(item.pageNum);
-            });
-            queueListEl.appendChild(div);
-        });
-
-        if (downloadQueue.length > 6) {
-            const div = document.createElement('div');
-            div.className = 'eh-mgr-queue-item';
-            div.style.fontStyle = 'italic';
-            div.innerText = `...and ${downloadQueue.length - 6} more`;
-            queueListEl.appendChild(div);
-        }
-    }
-
-    // === Gallery Ctrl+Hover Live Image Preview ===
-    let previewPopupEl = null;
-    let previewHoverTimeout = null;
-    let activePreviewReq = null;
-    let hoveredThumbInfo = null;
-
-    function initGalleryImagePreview() {
-        previewPopupEl = document.createElement('div');
-        previewPopupEl.id = 'eh-image-preview-popup';
-        previewPopupEl.innerHTML = `
-            <div id="eh-preview-spin" class="eh-preview-spinner">⟳ Loading image...</div>
-            <img id="eh-preview-img" src="" alt="Preview">
-            <div id="eh-preview-caption" class="eh-preview-caption"></div>
-        `;
-        document.body.appendChild(previewPopupEl);
-
-        const imgEl = previewPopupEl.querySelector('#eh-preview-img');
-        const capEl = previewPopupEl.querySelector('#eh-preview-caption');
-        const spinEl = previewPopupEl.querySelector('#eh-preview-spin');
-
-        document.querySelectorAll('#gdt a').forEach(link => {
-            const href = link.href;
-            const m = href.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
-            const pageNum = m ? m[2] : '1';
-
-            link.addEventListener('mouseenter', (e) => {
-                hoveredThumbInfo = { href, pageNum, x: e.clientX, y: e.clientY };
-                if (e.ctrlKey) {
-                    triggerPreview();
-                }
-            });
-
-            link.addEventListener('mousemove', (e) => {
-                if (hoveredThumbInfo) {
-                    hoveredThumbInfo.x = e.clientX;
-                    hoveredThumbInfo.y = e.clientY;
-                }
-                if (e.ctrlKey) {
-                    if (previewPopupEl.style.display !== 'flex') {
-                        triggerPreview();
-                    } else {
-                        const w = previewPopupEl.offsetWidth || 260;
-                        const h = previewPopupEl.offsetHeight || 340;
-                        positionPopupAtCursor(previewPopupEl, e.clientX, e.clientY, w, h);
-                    }
-                } else if (previewPopupEl.style.display === 'flex') {
-                    hidePreview();
-                }
-            });
-
-            link.addEventListener('mouseleave', () => {
-                hoveredThumbInfo = null;
-                hidePreview();
-            });
-        });
-
-        window.addEventListener('keydown', (e) => {
-            if ((e.key === 'Control' || e.ctrlKey) && hoveredThumbInfo && previewPopupEl.style.display !== 'flex') {
-                triggerPreview();
+        const liveCb = $('#eh-setting-live-thumbs', bar);
+        liveCb.addEventListener('change', e => {
+            const on = e.target.checked;
+            // Live thumbnails pull real images, which spends image limits.
+            // Say so once instead of quietly draining the quota.
+            if (on && !getSetting('eh_live_thumbs_warned', false)) {
+                const ok = confirm(
+                    'Animated thumbnails load the real images from the server.\n\n' +
+                    'That counts towards your image limit, exactly like opening each page.\n\n' +
+                    'Enable them?'
+                );
+                if (!ok) { e.target.checked = false; return; }
+                setSetting('eh_live_thumbs_warned', true);
             }
+            setSetting('eh_live_thumbs', on);
+            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', on);
+            if (on) LiveThumbs.enable(); else LiveThumbs.disable();
         });
 
-        window.addEventListener('keyup', (e) => {
-            if (e.key === 'Control' || !e.ctrlKey) {
-                if (previewPopupEl.style.display === 'flex') {
-                    hidePreview();
-                }
-            }
-        });
-
-        function triggerPreview() {
-            if (!hoveredThumbInfo) return;
-            clearTimeout(previewHoverTimeout);
-            showImagePreview(hoveredThumbInfo.href, hoveredThumbInfo.pageNum, hoveredThumbInfo.x, hoveredThumbInfo.y);
-        }
-
-        function hidePreview() {
-            clearTimeout(previewHoverTimeout);
-            if (activePreviewReq && typeof activePreviewReq.abort === 'function') {
-                try { activePreviewReq.abort(); } catch(e) {}
-            }
-            activePreviewReq = null;
-            previewPopupEl.style.display = 'none';
-            previewPopupEl.classList.remove('loaded');
-            imgEl.classList.remove('img-ready');
-            imgEl.src = '';
-            spinEl.style.display = 'flex';
-        }
-
-        function showImagePreview(viewerUrl, pageNum, clientX, clientY) {
-            previewPopupEl.style.display = 'flex';
-            capEl.innerText = `Page ${pageNum}`;
-            spinEl.style.display = 'flex';
-            imgEl.classList.remove('img-ready');
-
-            positionPopupAtCursor(previewPopupEl, clientX, clientY, 260, 340);
-
-            if (imagePreviewCache.has(viewerUrl)) {
-                const cached = imagePreviewCache.get(viewerUrl);
-                imgEl.src = cached.src;
-                imgEl.onload = () => {
-                    spinEl.style.display = 'none';
-                    imgEl.classList.add('img-ready');
-                    previewPopupEl.classList.add('loaded');
-                };
-                capEl.innerText = `Page ${pageNum} ${cached.res ? '(' + cached.res + ')' : ''}`;
-                return;
-            }
-
-            activePreviewReq = GM_xmlhttpRequest({
-                method: 'GET',
-                url: viewerUrl,
-                onload(res) {
-                    if (res.status === 200) {
-                        const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
-                        const fallbackImg = doc.querySelector('img#img');
-
-                        let targetSrc = '';
-                        let resStr = '';
-                        if (fallbackImg && fallbackImg.src) {
-                            targetSrc = fallbackImg.src;
-                            const i2 = doc.querySelector('#i2');
-                            const m = (i2 ? i2.textContent : '').match(/(\d+\s*x\s*\d+)/);
-                            resStr = m ? m[1].replace(/\s/g, '') : '';
-                        }
-
-                        if (targetSrc) {
-                            imagePreviewCache.set(viewerUrl, { src: targetSrc, res: resStr });
-                            if (previewPopupEl.style.display === 'flex') {
-                                imgEl.src = targetSrc;
-                                imgEl.onload = () => {
-                                    spinEl.style.display = 'none';
-                                    imgEl.classList.add('img-ready');
-                                    previewPopupEl.classList.add('loaded');
-                                };
-                                capEl.innerText = `Page ${pageNum} ${resStr ? '(' + resStr + ')' : ''}`;
-                            }
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    // === Gallery Queue Logic ===
-    const downloadQueue = [];
-    let isProcessing = false;
-    let activeXhrRequest = null;
-    let activeTask = null;
-    let completedCount = 0;
-    let totalAddedTasks = 0;
-
-    window.addEventListener('beforeunload', e => {
-        if (isProcessing || downloadQueue.length > 0) {
-            e.preventDefault();
-            e.returnValue = '';
-        }
-    });
-
-    function downloadAllVisible() {
-        const gid = getGalleryIdFromLocation();
-        const downloadedMap = getGalleryDownloadedMap(gid);
-        const items = Array.from(document.querySelectorAll('#gdt a'));
-
-        let targets = items.filter(link => {
-            const m = link.href.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
-            const p = m ? m[2] : null;
-            return p && !downloadedMap[p];
-        });
-
-        if (targets.length === 0) targets = items;
-
-        targets.forEach(link => {
-            const btn = link.querySelector('.eh-dl-btn');
-            if (!btn || btn.classList.contains('state-scan') || btn.classList.contains('state-dl') ||
-                btn.classList.contains('state-queued')) return;
-
-            const m = link.href.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
-            const pageNum = m ? m[2] : '000';
-            const galleryId = m ? m[1] : gid;
-
-            pushToQueue({ viewerUrl: link.href, galleryId, pageNum, btn });
-        });
-    }
-
-    function pushToQueue(task) {
-        if (downloadQueue.some(t => t.pageNum === task.pageNum)) return;
-        task.btn.className = 'eh-dl-btn state-queued';
-        task.btn.innerText = '⏳ Queued (✕)';
-        task.btn.title = 'Click to remove from queue';
-
-        downloadQueue.push(task);
-        totalAddedTasks++;
-        updateManagerUI();
-        processQueue();
-    }
-
-    function removeFromQueue(pageNum) {
-        const i = downloadQueue.findIndex(t => t.pageNum === pageNum);
-        if (i !== -1) {
-            const [r] = downloadQueue.splice(i, 1);
-            if (r.btn) {
-                const gid = r.galleryId || getGalleryIdFromLocation();
-                if (isPageDownloaded(gid, r.pageNum)) {
-                    r.btn.className = 'eh-dl-btn state-saved';
-                    r.btn.innerText = '✓ Saved';
-                } else {
-                    r.btn.className = 'eh-dl-btn';
-                    r.btn.innerText = '⬇ Download';
-                }
-                r.btn.title = '';
-            }
-            updateManagerUI();
-        }
-    }
-
-    function cancelAllTasks() {
-        if (activeXhrRequest && typeof activeXhrRequest.abort === 'function') {
-            try { activeXhrRequest.abort(); } catch(e) {}
-        }
-        activeXhrRequest = null;
-
-        const gid = getGalleryIdFromLocation();
-        if (activeTask && activeTask.btn) {
-            if (isPageDownloaded(gid, activeTask.pageNum)) {
-                activeTask.btn.className = 'eh-dl-btn state-saved';
-                activeTask.btn.innerText = '✓ Saved';
-            } else {
-                activeTask.btn.className = 'eh-dl-btn';
-                activeTask.btn.innerText = '⬇ Download';
-            }
-            activeTask.btn.title = '';
-        }
-        activeTask = null;
-
-        downloadQueue.forEach(t => {
-            if (t.btn) {
-                if (isPageDownloaded(gid, t.pageNum)) {
-                    t.btn.className = 'eh-dl-btn state-saved';
-                    t.btn.innerText = '✓ Saved';
-                } else {
-                    t.btn.className = 'eh-dl-btn';
-                    t.btn.innerText = '⬇ Download';
-                }
-                t.btn.title = '';
-            }
-        });
-        downloadQueue.length = 0;
-
-        isProcessing = false;
-        if (progressBarEl) progressBarEl.style.width = '0%';
-        if (progressTextEl) progressTextEl.innerText = '0%';
-        if (currentTaskEl) currentTaskEl.innerText = 'Cancelled';
-
-        updateTimerDisplay();
-        updateManagerUI();
-    }
-
-    function processQueue() {
-        if (isProcessing || downloadQueue.length === 0) return;
-
-        isProcessing = true;
-        updateTimerDisplay();
-        activeTask = downloadQueue.shift();
-        updateManagerUI();
-
-        executeDownload(activeTask, wasCancelled => {
-            isProcessing = false;
-            activeTask = null;
-            activeXhrRequest = null;
-
-            if (!wasCancelled) completedCount++;
-            updateManagerUI();
-
-            fetchImageLimits(() => processQueue());
-        });
-    }
-
-    function executeDownload(task, onComplete) {
-        const { viewerUrl, galleryId, pageNum, btn } = task;
-        let cancelled = false;
-
-        btn.className = 'eh-dl-btn state-scan';
-        btn.innerText = '⟳ Searching...';
-        btn.title = '';
-        currentTaskEl.innerText = `Page ${pageNum}: Searching...`;
-        progressBarEl.style.width = '0%';
-        progressTextEl.innerText = '0%';
-
-        activeXhrRequest = GM_xmlhttpRequest({
-            method: 'GET',
-            url: viewerUrl,
-            onload(response) {
-                if (cancelled) return;
-                if (response.status !== 200) {
-                    showError(btn, 'Err: HTTP ' + response.status);
-                    onComplete(false);
-                    return;
-                }
-
-                const doc = new DOMParser().parseFromString(response.responseText, 'text/html');
-                const origNode = doc.querySelector('div#i6 a[href*="/fullimg/"]');
-                const fallback = doc.querySelector('img#img');
-
-                let targetUrl = '', resStr = 'Image', isOriginal = false;
-                if (origNode) {
-                    isOriginal = true;
-                    targetUrl = origNode.href;
-                    const m = (origNode.textContent || '').match(/(\d+\s*x\s*\d+)/);
-                    resStr = m ? m[1].replace(/\s/g, '') : 'Original';
-                } else if (fallback && fallback.src) {
-                    targetUrl = fallback.src;
-                    const i2 = doc.querySelector('#i2');
-                    const m = (i2 ? i2.textContent : '').match(/(\d+\s*x\s*\d+)/);
-                    resStr = m ? m[1].replace(/\s/g, '') : 'MaxRes';
-                } else {
-                    showError(btn, 'Err: File not found');
-                    onComplete(false);
-                    return;
-                }
-
-                const ext = getExtension(targetUrl);
-                const filename = `${getGalleryTitle()} - ${String(pageNum).padStart(3,'0')}.${ext}`;
-                const label = isOriginal ? resStr : `${resStr} [Res]`;
-
-                btn.className = 'eh-dl-btn state-dl';
-                btn.innerText = `↓ ${label}...`;
-                currentTaskEl.innerText = `Page ${pageNum} (${label})`;
-
-                activeXhrRequest = GM_xmlhttpRequest({
-                    method: 'GET',
-                    url: targetUrl,
-                    responseType: 'blob',
-                    headers: { 'Referer': viewerUrl },
-                    onprogress(p) {
-                        if (cancelled || !p.lengthComputable) return;
-                        const pct = Math.round(p.loaded / p.total * 100);
-                        progressBarEl.style.width = pct + '%';
-                        progressTextEl.innerText = pct + '%';
-                        btn.innerText = `↓ ${pct}%`;
-                    },
-                    onload(blobRes) {
-                        if (cancelled) return;
-                        if (blobRes.status === 200) {
-                            const blob = blobRes.response;
-                            const sz = blob.size > 1024 * 1024
-                                ? (blob.size / (1024 * 1024)).toFixed(2) + ' MB'
-                                : (blob.size / 1024).toFixed(0) + ' KB';
-
-                            const url2 = URL.createObjectURL(blob);
-                            const a = Object.assign(document.createElement('a'), {
-                                style: 'display:none',
-                                href: url2,
-                                download: filename
-                            });
-                            document.body.appendChild(a);
-                            a.click();
-                            setTimeout(() => {
-                                document.body.removeChild(a);
-                                URL.revokeObjectURL(url2);
-                            }, 200);
-
-                            markPageDownloaded(galleryId || getGalleryIdFromLocation(), pageNum, { res: label, size: sz });
-                            refreshGallerySavedStats();
-
-                            btn.className = 'eh-dl-btn state-saved';
-                            btn.innerText = `✓ Saved (${sz})`;
-                        } else {
-                            showError(btn, 'Err: ' + blobRes.status);
-                        }
-                        onComplete(false);
-                    },
-                    onerror(err) {
-                        if (cancelled) return;
-                        console.error('[EH DL]', err);
-                        showError(btn, 'Err: Network/Hath');
-                        onComplete(false);
-                    },
-                    onabort() {
-                        cancelled = true;
-                        onComplete(true);
-                    }
-                });
-            },
-            onerror() {
-                if (cancelled) return;
-                showError(btn, 'Err: Connection');
-                onComplete(false);
-            },
-            onabort() {
-                cancelled = true;
-                onComplete(true);
-            }
-        });
+        applyNewTabBehavior(openNewTab);
     }
 
     function initGalleryPage() {
-        const items = document.querySelectorAll('#gdt a');
-        if (items.length === 0) return;
-
-        createControlBarUI();
-        createManagerUI();
-        fetchImageLimits();
-        initIdlePolling();
-        initGalleryImagePreview();
+        const links = $$('#gdt a[href*="/s/"]');
+        if (!links.length) return;
 
         const gid = getGalleryIdFromLocation();
-        const downloadedMap = getGalleryDownloadedMap(gid);
+        const saved = History.forGallery(gid);
 
-        items.forEach(link => {
-            const m = link.href.match(/\/s\/[0-9a-fA-F]+\/(\d+)-(\d+)/);
+        buildGalleryBar();
+        DownloadQueue.init();
+        Quota.start(() => DownloadQueue.isBusy);
+        initGalleryImagePreview();
+
+        for (const link of links) {
+            const m = link.href.match(PAGE_RE);
             const pageNum = m ? m[2] : '000';
             const galleryId = m ? m[1] : gid;
 
+            // The button is absolutely positioned inside the link, so the
+            // link must be both a containing block and a real box.
             link.style.position = 'relative';
-            link.style.display = 'inline-block';
+            if (getComputedStyle(link).display === 'inline') link.style.display = 'inline-block';
 
-            const btn = document.createElement('div');
-            if (downloadedMap[pageNum]) {
-                btn.className = 'eh-dl-btn state-saved';
-                btn.innerText = '✓ Saved';
-                btn.title = `Downloaded on ${new Date(downloadedMap[pageNum].time).toLocaleDateString()}. Click to re-download.`;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            if (saved[pageNum]) {
+                setBtn(btn, 'saved', '✓ Saved',
+                    `Downloaded ${new Date(saved[pageNum].time).toLocaleDateString()}. Click to re-download.`);
             } else {
-                btn.className = 'eh-dl-btn';
-                btn.innerText = '⬇ Download';
+                setBtn(btn, '', '⬇ Download');
             }
 
             btn.addEventListener('click', e => {
                 e.preventDefault();
                 e.stopPropagation();
-
-                if (btn.classList.contains('state-queued')) {
-                    removeFromQueue(pageNum);
-                    return;
-                }
-
-                if (btn.classList.contains('state-scan') || btn.classList.contains('state-dl')) return;
-
-                pushToQueue({ viewerUrl: link.href, galleryId, pageNum, btn });
+                if (btn.classList.contains('state-queued')) { DownloadQueue.remove(pageNum); return; }
+                if (/state-(scan|dl)/.test(btn.className)) return;
+                DownloadQueue.push({ viewerUrl: link.href, galleryId, pageNum, btn });
             });
 
             link.appendChild(btn);
+        }
+
+        refreshGallerySavedStats();
+        if (getSetting('eh_live_thumbs', false)) LiveThumbs.enable();
+
+        window.addEventListener('beforeunload', e => {
+            if (!DownloadQueue.isBusy) return;
+            e.preventDefault();
+            e.returnValue = '';
+        });
+
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && DownloadQueue.isBusy) DownloadQueue.cancelAll();
         });
     }
+    // =====================================================================
+    // === CTRL+HOVER FULL IMAGE PREVIEW ===================================
+    // One delegated listener instead of three per thumbnail, and the popup
+    // is sized from the reported resolution before the bytes arrive, so it
+    // no longer jumps around as the image decodes.
+    // =====================================================================
+    function initGalleryImagePreview() {
+        const gdt = $('#gdt');
+        if (!gdt || $('#eh-image-preview-popup')) return;
 
-    // =============================================
-    // === 2. SINGLE IMAGE VIEWER PAGE MODE (/s/*) ===
-    // =============================================
-    let viewerActiveXhr = null;
+        const popup = document.createElement('div');
+        popup.id = 'eh-image-preview-popup';
+        popup.innerHTML = `
+            <div class="eh-preview-stage" id="eh-preview-stage">
+                <img id="eh-preview-img" alt="">
+                <div id="eh-preview-spin" class="eh-preview-spinner">⟳ loading…</div>
+            </div>
+            <div id="eh-preview-caption" class="eh-preview-caption"></div>`;
+        document.body.appendChild(popup);
 
+        const stage = $('#eh-preview-stage', popup);
+        const imgEl = $('#eh-preview-img', popup);
+        const capEl = $('#eh-preview-caption', popup);
+        const spinEl = $('#eh-preview-spin', popup);
+
+        const MAX_W = 620;
+        const maxH = () => Math.round(innerHeight * 0.72);
+
+        let hovered = null;          // { url, pageNum }
+        let cursor = { x: 0, y: 0 };
+        let openFor = null;
+        let loadToken = 0;
+
+        function fitStage(resText) {
+            const m = String(resText || '').match(/(\d+)x(\d+)/i);
+            const w = m ? parseInt(m[1], 10) : 480;
+            const h = m ? parseInt(m[2], 10) : 640;
+            const scale = Math.min(MAX_W / w, maxH() / h, 1);
+            stage.style.width = Math.round(w * scale) + 'px';
+            stage.style.height = Math.round(h * scale) + 'px';
+        }
+
+        const reposition = rafThrottle(() => {
+            if (!popup.classList.contains('is-open')) return;
+            positionPopupAtCursor(popup, cursor.x, cursor.y, popup.offsetWidth, popup.offsetHeight);
+        });
+
+        function close() {
+            openFor = null;
+            loadToken++;
+            popup.classList.remove('is-open');
+            imgEl.classList.remove('img-ready');
+            imgEl.removeAttribute('src');
+            stage.classList.add('is-skeleton');
+            spinEl.style.display = 'flex';
+        }
+
+        function show(info, pageNum) {
+            spinEl.style.display = 'none';
+            stage.classList.remove('is-skeleton');
+            imgEl.classList.add('img-ready');
+            const bits = [`Page ${pageNum}`];
+            if (info.displayRes) bits.push(info.displayRes);
+            if (info.sizeText) bits.push(info.sizeText);
+            capEl.innerHTML = bits.map((b, i) => (i ? `<b>${b}</b>` : b)).join(' · ');
+        }
+
+        function open() {
+            if (!hovered || openFor === hovered.url) return;
+            openFor = hovered.url;
+            const token = ++loadToken;
+            const { url, pageNum } = hovered;
+
+            capEl.textContent = `Page ${pageNum}`;
+            imgEl.classList.remove('img-ready');
+            imgEl.removeAttribute('src');
+            stage.classList.add('is-skeleton');
+            spinEl.style.display = 'flex';
+            popup.classList.add('is-open');
+
+            const cached = viewerPageCache.get(url);
+            fitStage(cached && cached.displayRes);
+            reposition();
+
+            loadViewerInfo(url).then(info => {
+                if (token !== loadToken) return;
+                const src = info.displayUrl || info.originalUrl;
+                if (!src) { capEl.textContent = `Page ${pageNum} — no source`; return; }
+                fitStage(info.displayRes);
+                reposition();
+                imgEl.src = src;
+                const done = () => { if (token === loadToken) show(info, pageNum); };
+                if (imgEl.decode) imgEl.decode().then(done).catch(done);
+                else imgEl.onload = done;
+            }).catch(err => {
+                if (token !== loadToken) return;
+                spinEl.textContent = err && err.kind === QUOTA_HALT ? '⚠ image limit reached' : '⚠ could not load';
+            });
+        }
+
+        gdt.addEventListener('pointerover', e => {
+            const link = e.target.closest('a[href*="/s/"]');
+            if (!link) return;
+            const m = link.href.match(PAGE_RE);
+            hovered = { url: link.href, pageNum: m ? m[2] : '?' };
+            cursor = { x: e.clientX, y: e.clientY };
+            if (e.ctrlKey) open();
+        });
+
+        gdt.addEventListener('pointermove', e => {
+            cursor = { x: e.clientX, y: e.clientY };
+            if (!hovered) return;
+            if (e.ctrlKey) {
+                if (!popup.classList.contains('is-open')) open();
+                else reposition();
+            } else if (popup.classList.contains('is-open')) {
+                close();
+            }
+        }, { passive: true });
+
+        gdt.addEventListener('pointerout', e => {
+            if (e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest('#gdt a[href*="/s/"]')) return;
+            hovered = null;
+            close();
+        });
+
+        window.addEventListener('keydown', e => {
+            if (e.key === 'Control' && hovered) open();
+        });
+
+        window.addEventListener('keyup', e => {
+            if (e.key === 'Control' || !e.ctrlKey) close();
+        });
+
+        window.addEventListener('blur', close);
+    }
+
+    // =====================================================================
+    // === SINGLE IMAGE VIEWER (/s/*) ======================================
+    // =====================================================================
     function initViewerPage() {
-        if (document.getElementById('eh-viewer-control-bar')) return;
+        const i1 = $('#i1');
+        if (!i1 || !$('img#img') || $('#eh-viewer-control-bar')) return;
 
-        const i1 = document.querySelector('#i1');
-        const img = document.querySelector('img#img');
-        if (!i1 || !img) return;
-
-        fetchImageLimits();
-        if (!idleIntervalId) initIdlePolling();
+        let activeReq = null;
+        let downloading = false;
 
         const bar = document.createElement('div');
         bar.id = 'eh-viewer-control-bar';
         bar.innerHTML = `
             <div class="eh-viewer-left">
-                <a id="eh-vp" class="eh-viewer-nav-btn" href="#" title="Previous (← / A)">◀ Prev</a>
-                <a id="eh-vn" class="eh-viewer-nav-btn" href="#" title="Next (→ / D)">Next ▶</a>
-                <div style="width:1px;height:18px;background:#4f535b;margin:0 2px;flex-shrink:0;"></div>
-                <button id="eh-vdl" class="eh-viewer-btn">⬇ Download Original</button>
-                <button id="eh-vcancel" class="eh-viewer-cancel-btn">✕ Cancel</button>
-                <div class="eh-quota-badge">
-                    <span id="eh-viewer-quota-value">Limits: <i>Checking...</i></span>
+                <a id="eh-vp" class="eh-viewer-nav-btn" href="#" title="Previous page (← or A)">◀ Prev</a>
+                <a id="eh-vn" class="eh-viewer-nav-btn" href="#" title="Next page (→ or D)">Next ▶</a>
+                <div class="eh-viewer-sep"></div>
+                <button type="button" id="eh-vdl" class="eh-viewer-btn" title="Download (S)">⬇ Download original</button>
+                <button type="button" id="eh-vcancel" class="eh-viewer-cancel-btn">✕ Cancel</button>
+                <div class="eh-badge eh-quota-badge">
+                    <span id="eh-viewer-quota-value">Image Limits: <i>checking…</i></span>
                     <span id="eh-viewer-quota-timer" class="eh-timer-badge">⏱ 60s</span>
                 </div>
             </div>
-            <div id="eh-vpage-info" style="font-size:11px;color:#a0a0a0;white-space:nowrap;">Page ...</div>
-        `;
+            <div id="eh-vpage-info" class="eh-top-right">
+                <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer">v${VERSION}</a>
+            </div>`;
         i1.parentNode.insertBefore(bar, i1);
 
-        const prevBtn   = bar.querySelector('#eh-vp');
-        const nextBtn   = bar.querySelector('#eh-vn');
-        const dlBtn     = bar.querySelector('#eh-vdl');
-        const cancelBtn = bar.querySelector('#eh-vcancel');
-        const pageInfo  = bar.querySelector('#eh-vpage-info');
+        const prevBtn = $('#eh-vp', bar);
+        const nextBtn = $('#eh-vn', bar);
+        const dlBtn = $('#eh-vdl', bar);
+        const cancelBtn = $('#eh-vcancel', bar);
+        const pageInfo = $('#eh-vpage-info', bar);
 
-        function updateViewerUI() {
-            const i2 = document.querySelector('#i2');
-            const i2Text = i2 ? i2.innerText : '';
-            const match = i2Text.match(/(\d+)\s*\/\s*(\d+)/);
-            const currentPage = match ? parseInt(match[1], 10) : 1;
-            const totalPages = match ? parseInt(match[2], 10) : 1;
+        Quota.start(() => downloading);
 
-            const gid = getGalleryIdFromLocation();
-            const isSaved = isPageDownloaded(gid, currentPage);
-
-            const origNode = document.querySelector('div#i6 a[href*="/fullimg/"]');
-            const hasOriginal = !!origNode;
-            const origText = origNode ? origNode.textContent : '';
-            const resMatch = origText.match(/(\d+\s*x\s*\d+)/);
-            const resStr = resMatch ? ` (${resMatch[1].replace(/\s/g, '')})` : '';
-
-            const prevA = document.querySelector('a#prev');
-            const nextA = document.querySelector('a#next');
-
-            pageInfo.innerText = `Page ${currentPage} / ${totalPages} • ExH Downloader v13.3`;
-
-            prevBtn.classList.toggle('disabled', currentPage <= 1);
-            prevBtn.href = prevA ? prevA.href : '#';
-
-            nextBtn.classList.toggle('disabled', currentPage >= totalPages);
-            nextBtn.href = nextA ? nextA.href : '#';
-
-            if (!dlBtn.classList.contains('state-dl')) {
-                if (isSaved) {
-                    dlBtn.className = 'eh-viewer-btn state-saved';
-                    dlBtn.innerText = `✓ Saved${resStr} (Re-download)`;
-                } else {
-                    dlBtn.className = 'eh-viewer-btn';
-                    dlBtn.innerText = hasOriginal ? `⬇ Download Original${resStr}` : '⬇ Download Image';
-                }
-                cancelBtn.style.display = 'none';
-            }
+        function readPageState() {
+            const text = ($('#i2') || {}).textContent || '';
+            const m = text.match(/(\d+)\s*\/\s*(\d+)/);
+            return {
+                page: m ? parseInt(m[1], 10) : 1,
+                total: m ? parseInt(m[2], 10) : 1
+            };
         }
 
-        prevBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            const i2Text = document.querySelector('#i2')?.innerText || '';
-            const match = i2Text.match(/(\d+)\s*\/\s*(\d+)/);
-            const currentPage = match ? parseInt(match[1], 10) : 1;
-            if (currentPage > 1) {
-                const prevA = document.querySelector('a#prev');
-                if (prevA) {
-                    prevA.click();
-                } else {
-                    window.location.assign(prevBtn.href);
-                }
+        const syncUI = rafThrottle(() => {
+            const { page, total } = readPageState();
+            const gid = getGalleryIdFromLocation();
+            const info = parseViewerDoc(document);
+
+            pageInfo.innerHTML =
+                `Page ${page} / ${total} · <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer">v${VERSION}</a>`;
+
+            prevBtn.classList.toggle('disabled', page <= 1);
+            nextBtn.classList.toggle('disabled', page >= total);
+            const prevA = $('a#prev');
+            const nextA = $('a#next');
+            prevBtn.href = prevA ? prevA.href : '#';
+            nextBtn.href = nextA ? nextA.href : '#';
+
+            if (downloading) return;
+
+            const res = info.originalRes || info.displayRes;
+            const suffix = res ? ` (${res})` : '';
+            if (History.isSaved(gid, page)) {
+                dlBtn.className = 'eh-viewer-btn state-saved';
+                dlBtn.textContent = `✓ Saved${suffix} — re-download`;
+            } else {
+                dlBtn.className = 'eh-viewer-btn';
+                dlBtn.textContent = info.originalUrl ? `⬇ Download original${suffix}` : `⬇ Download image${suffix}`;
             }
+            cancelBtn.style.display = 'none';
         });
 
-        nextBtn.addEventListener('click', (e) => {
-            e.preventDefault();
-            const i2Text = document.querySelector('#i2')?.innerText || '';
-            const match = i2Text.match(/(\d+)\s*\/\s*(\d+)/);
-            const currentPage = match ? parseInt(match[1], 10) : 1;
-            const totalPages = match ? parseInt(match[2], 10) : 1;
-            if (currentPage < totalPages) {
-                const nextA = document.querySelector('a#next');
-                if (nextA) {
-                    nextA.click();
-                } else {
-                    window.location.assign(nextBtn.href);
-                }
-            }
-        });
+        function navigate(dir) {
+            const { page, total } = readPageState();
+            if (dir < 0 && page <= 1) return;
+            if (dir > 0 && page >= total) return;
+            const a = dir < 0 ? $('a#prev') : $('a#next');
+            const btn = dir < 0 ? prevBtn : nextBtn;
+            if (a) a.click();
+            else if (btn.href && btn.href !== '#') location.assign(btn.href);
+        }
 
-        document.addEventListener('keydown', (e) => {
-            if (['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
-            if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') {
-                prevBtn.click();
-            } else if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') {
-                nextBtn.click();
+        prevBtn.addEventListener('click', e => { e.preventDefault(); navigate(-1); });
+        nextBtn.addEventListener('click', e => { e.preventDefault(); navigate(1); });
+
+        document.addEventListener('keydown', e => {
+            // Never hijack browser shortcuts such as Ctrl+D or Alt+Arrow.
+            if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return;
+            if (e.defaultPrevented) return;
+            const tag = (document.activeElement || {}).tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || (document.activeElement || {}).isContentEditable) return;
+
+            switch (e.key) {
+                case 'ArrowLeft': case 'a': case 'A':
+                    e.preventDefault(); navigate(-1); break;
+                case 'ArrowRight': case 'd': case 'D':
+                    e.preventDefault(); navigate(1); break;
+                case 's': case 'S':
+                    e.preventDefault(); startDownload(); break;
+                case 'Escape':
+                    if (activeReq) { try { activeReq.abort(); } catch { /* gone */ } }
+                    break;
             }
         });
 
         cancelBtn.addEventListener('click', () => {
-            if (viewerActiveXhr && typeof viewerActiveXhr.abort === 'function') {
-                viewerActiveXhr.abort();
-            }
-            viewerActiveXhr = null;
-            isProcessing = false;
+            if (activeReq) { try { activeReq.abort(); } catch { /* gone */ } }
+            activeReq = null;
+            downloading = false;
             cancelBtn.style.display = 'none';
-            updateViewerUI();
-            updateTimerDisplay();
+            syncUI();
+            Quota.renderTimer();
         });
 
-        dlBtn.addEventListener('click', () => {
-            if (dlBtn.classList.contains('state-dl')) return;
+        async function startDownload() {
+            if (downloading) return;
 
-            const i2 = document.querySelector('#i2');
-            const i2Text = i2 ? i2.innerText : '';
-            const match = i2Text.match(/(\d+)\s*\/\s*(\d+)/);
-            const pageNum = match ? match[1] : '1';
-            const gid = getGalleryIdFromLocation();
-
-            const origNode = document.querySelector('div#i6 a[href*="/fullimg/"]');
-            const fallbackImg = document.querySelector('img#img');
-
-            let targetUrl = '', resStr = 'Original';
-            if (origNode && origNode.href) {
-                targetUrl = origNode.href;
-                const m = (origNode.textContent || '').match(/(\d+\s*x\s*\d+)/);
-                resStr = m ? m[1].replace(/\s/g, '') : 'Original';
-            } else if (fallbackImg && fallbackImg.src) {
-                targetUrl = fallbackImg.src;
-                const m = (i2 ? i2.textContent : '').match(/(\d+\s*x\s*\d+)/);
-                resStr = m ? m[1].replace(/\s/g, '') : 'Standard';
-            } else {
-                alert('Image source URL could not be found.');
+            const info = parseViewerDoc(document);
+            const targetUrl = info.originalUrl || info.displayUrl;
+            if (!targetUrl) {
+                dlBtn.className = 'eh-viewer-btn state-err';
+                dlBtn.textContent = '✕ No source found';
                 return;
             }
 
-            const ext = getExtension(targetUrl);
-            const title = getGalleryTitle();
-            const filename = `${title} - ${String(pageNum).padStart(3, '0')}.${ext}`;
+            const { page } = readPageState();
+            const gid = getGalleryIdFromLocation();
+            const resLabel = (info.originalUrl ? info.originalRes : info.displayRes) || 'image';
 
+            downloading = true;
+            cancelBtn.style.display = 'inline-flex';
             dlBtn.className = 'eh-viewer-btn state-dl';
-            dlBtn.innerText = `↓ 0% (${resStr})...`;
-            cancelBtn.style.display = 'inline-block';
-            isProcessing = true;
-            updateTimerDisplay();
+            dlBtn.textContent = `↓ 0% (${resLabel})`;
+            Quota.renderTimer();
 
-            viewerActiveXhr = GM_xmlhttpRequest({
-                method: 'GET',
-                url: targetUrl,
-                responseType: 'blob',
-                headers: { 'Referer': location.href },
-                onprogress(p) {
-                    if (!p.lengthComputable) return;
-                    const pct = Math.round((p.loaded / p.total) * 100);
-                    const mb = p.total > 1024 * 1024
-                        ? ` ${(p.loaded / (1024 * 1024)).toFixed(1)}/${(p.total / (1024 * 1024)).toFixed(1)} MB`
-                        : '';
-                    dlBtn.innerText = `↓ ${pct}%${mb}`;
-                },
-                onload(blobRes) {
-                    isProcessing = false;
-                    cancelBtn.style.display = 'none';
-                    updateTimerDisplay();
+            try {
+                const { blob, res } = await withRetry(
+                    () => fetchImageBlob(targetUrl, {
+                        referer: location.href,
+                        onHandle: req => { activeReq = req; },
+                        onprogress: p => {
+                            if (!p.lengthComputable) return;
+                            const pct = Math.round((p.loaded / p.total) * 100);
+                            dlBtn.textContent = `↓ ${pct}% · ${formatBytes(p.loaded)} / ${formatBytes(p.total)}`;
+                        }
+                    }),
+                    { attempts: 3, onRetry: n => { dlBtn.textContent = `↻ Retry ${n}…`; } }
+                );
 
-                    if (blobRes.status === 200) {
-                        const blob = blobRes.response;
-                        const sz = blob.size > 1024 * 1024
-                            ? (blob.size / (1024 * 1024)).toFixed(2) + ' MB'
-                            : (blob.size / 1024).toFixed(0) + ' KB';
+                const ext = (await sniffExtension(blob)) ||
+                            extFromContentType(res.responseHeaders) ||
+                            info.fileExt ||
+                            extFromUrl(targetUrl) ||
+                            'jpg';
 
-                        const oUrl = URL.createObjectURL(blob);
-                        const a = Object.assign(document.createElement('a'), {
-                            style: 'display:none',
-                            href: oUrl,
-                            download: filename
-                        });
-                        document.body.appendChild(a);
-                        a.click();
-                        setTimeout(() => {
-                            document.body.removeChild(a);
-                            URL.revokeObjectURL(oUrl);
-                        }, 200);
+                const pad = padWidthFor(getGalleryPageCount());
+                saveBlob(blob, `${getGalleryTitle()} - ${String(page).padStart(pad, '0')}.${ext}`);
 
-                        markPageDownloaded(gid, pageNum, { res: resStr, size: sz });
+                const sizeText = formatBytes(blob.size);
+                History.mark(gid, page, { res: resLabel, size: sizeText });
 
-                        dlBtn.className = 'eh-viewer-btn state-saved';
-                        dlBtn.innerText = `✓ Saved (${sz})`;
-                        fetchImageLimits();
-                    } else {
-                        dlBtn.className = 'eh-viewer-btn state-err';
-                        dlBtn.innerText = `Err: HTTP ${blobRes.status}`;
-                    }
-                },
-                onerror() {
-                    isProcessing = false;
-                    cancelBtn.style.display = 'none';
-                    updateTimerDisplay();
+                dlBtn.className = 'eh-viewer-btn state-saved';
+                dlBtn.textContent = `✓ Saved ${sizeText}`;
+                Quota.refresh({ force: true });
+
+            } catch (err) {
+                if (!err || err.kind !== 'abort') {
                     dlBtn.className = 'eh-viewer-btn state-err';
-                    dlBtn.innerText = 'Err: Network';
-                },
-                onabort() {
-                    isProcessing = false;
-                    cancelBtn.style.display = 'none';
-                    updateTimerDisplay();
+                    dlBtn.textContent = err && err.kind === QUOTA_HALT
+                        ? '⚠ Image limit reached'
+                        : `✕ ${err && err.kind === 'http' ? 'HTTP ' + err.detail : 'Failed'}`;
+                    console.warn('[ExHD] viewer download failed', err);
                 }
+            } finally {
+                downloading = false;
+                activeReq = null;
+                cancelBtn.style.display = 'none';
+                Quota.renderTimer();
+            }
+        }
+
+        dlBtn.addEventListener('click', startDownload);
+
+        // The viewer swaps pages in place; watch the caption and the original
+        // link, coalescing bursts of mutations into a single UI sync.
+        const observer = new MutationObserver(syncUI);
+        for (const sel of ['#i2', '#i6', '#i3']) {
+            const el = $(sel);
+            if (el) observer.observe(el, { childList: true, subtree: true, characterData: true });
+        }
+
+        syncUI();
+    }
+    // =====================================================================
+    // === FRONT PAGE / SEARCH GALLERY PEEKER ==============================
+    // =====================================================================
+    const peekCache = new LruMap(120);
+
+    // Cached so the delegated hover handler never touches GM storage.
+    let peekerEnabled = getSetting('eh_gallery_peeker', true);
+
+    function extractPeekThumbs(doc, limit = 8) {
+        const out = [];
+        const nodes = Array.from(doc.querySelectorAll('#gdt > a, #gdt > div, #gdt .gdtm, #gdt .gdtl'));
+
+        for (const node of nodes) {
+            if (out.length >= limit) break;
+
+            // Large-thumbnail mode serves plain <img> elements.
+            const img = node.querySelector('img[src]');
+            if (img && !/^data:/.test(img.src)) { out.push({ type: 'img', src: img.src }); continue; }
+
+            // Every other mode paints a slice of a sprite sheet.
+            const spriteEl = node.querySelector('div[style*="url("]') ||
+                             (String(node.getAttribute('style') || '').includes('url(') ? node : null);
+            if (!spriteEl) continue;
+
+            const style = spriteEl.getAttribute('style') || '';
+            const url = (style.match(/url\((['"]?)([^'")]+)\1\)/) || [])[2];
+            if (!url) continue;
+
+            out.push({
+                type: 'sprite',
+                url,
+                offset: (style.match(/(-?\d+)px\s+(-?\d+)/) || [null, '0', '0']).slice(1).map(Number),
+                w: parseInt((style.match(/width:\s*(\d+)/i) || [])[1], 10) || 100,
+                h: parseInt((style.match(/height:\s*(\d+)/i) || [])[1], 10) || 141
             });
-        });
-
-        const observer = new MutationObserver(() => {
-            updateViewerUI();
-        });
-
-        const i2El = document.querySelector('#i2');
-        if (i2El) observer.observe(i2El, { childList: true, subtree: true, characterData: true });
-
-        const i6El = document.querySelector('#i6');
-        if (i6El) observer.observe(i6El, { childList: true, subtree: true, characterData: true });
-
-        updateViewerUI();
+        }
+        return out;
     }
 
-    // =============================================
-    // === 3. FRONT PAGE & SEARCH GALLERY PEEKER ===
-    // =============================================
-    const galleryPeekCache = new Map();
-    let peekPopupEl = null;
-    let peekHoverTimeout = null;
-    let activePeekReq = null;
+    function extractPeekData(doc) {
+        const gddVal = label => {
+            const row = Array.from(doc.querySelectorAll('#gdd tr')).find(tr => tr.textContent.includes(label));
+            const cell = row && row.querySelector('.gdt2');
+            return cell ? cell.textContent.trim().replace(/\s+/g, ' ') : '';
+        };
+        const cat = doc.querySelector('#gdc .cs, #gdc div, .cs');
+        const rating = doc.querySelector('#rating_label');
+
+        return {
+            title: (doc.querySelector('#gn') || doc.querySelector('#gj') || {}).textContent || 'Gallery',
+            category: cat ? cat.textContent.trim() : '',
+            uploader: ((doc.querySelector('#gdn a') || doc.querySelector('#gdn') || {}).textContent || '').trim(),
+            language: gddVal('Language:'),
+            fileSize: gddVal('File Size:'),
+            length: gddVal('Length:'),
+            rating: rating ? (rating.textContent.match(/([\d.]+)/) || [])[1] || '' : '',
+            tags: Array.from(doc.querySelectorAll('#taglist a')).slice(0, 10).map(a => a.textContent.trim()),
+            thumbs: extractPeekThumbs(doc)
+        };
+    }
 
     function initFrontPagePeeker() {
-        peekPopupEl = document.createElement('div');
-        peekPopupEl.id = 'eh-gallery-peek-popup';
-        peekPopupEl.innerHTML = `
-            <div id="eh-peek-title" class="eh-peek-header">Loading gallery...</div>
-            <div id="eh-peek-meta" class="eh-peek-meta"><span>Fetching info...</span></div>
-            <div id="eh-peek-grid" class="eh-peek-grid">
-                ${Array(8).fill('<div class="eh-peek-thumb skeleton"></div>').join('')}
-            </div>
-        `;
-        document.body.appendChild(peekPopupEl);
+        if ($('#eh-gallery-peek-popup')) return;
 
-        const titleEl = peekPopupEl.querySelector('#eh-peek-title');
-        const metaEl = peekPopupEl.querySelector('#eh-peek-meta');
-        const gridEl = peekPopupEl.querySelector('#eh-peek-grid');
+        const popup = document.createElement('div');
+        popup.id = 'eh-gallery-peek-popup';
+        popup.innerHTML = `
+            <div id="eh-peek-title" class="eh-peek-header">Loading…</div>
+            <div id="eh-peek-meta" class="eh-peek-meta"><span>fetching info…</span></div>
+            <div id="eh-peek-tags" class="eh-peek-tags"></div>
+            <div id="eh-peek-grid" class="eh-peek-grid"></div>`;
+        document.body.appendChild(popup);
 
-        createFrontPageBar();
+        const titleEl = $('#eh-peek-title', popup);
+        const metaEl = $('#eh-peek-meta', popup);
+        const tagsEl = $('#eh-peek-tags', popup);
+        const gridEl = $('#eh-peek-grid', popup);
 
-        const galleryLinks = Array.from(document.querySelectorAll('a[href*="/g/"]')).filter(a => {
-            return a.href.match(/\/g\/\d+\/[0-9a-fA-F]+/);
+        let hoverTimer = null;
+        let activeReq = null;
+        let cursor = { x: 0, y: 0 };
+        let openUrl = null;
+        let token = 0;
+
+        const skeleton = () => {
+            gridEl.textContent = '';
+            for (let i = 0; i < 8; i++) {
+                const d = document.createElement('div');
+                d.className = 'eh-peek-thumb skeleton';
+                gridEl.appendChild(d);
+            }
+        };
+
+        const reposition = rafThrottle(() => {
+            if (!popup.classList.contains('is-open')) return;
+            positionPopupAtCursor(popup, cursor.x, cursor.y, popup.offsetWidth || 470, popup.offsetHeight || 380);
         });
 
-        galleryLinks.forEach(link => {
-            const galleryUrl = link.href.match(/(https?:\/\/[^\/]+\/g\/\d+\/[0-9a-fA-F]+\/)/)?.[1] || link.href;
+        function close() {
+            clearTimeout(hoverTimer);
+            token++;
+            openUrl = null;
+            if (activeReq) { try { activeReq.abort(); } catch { /* gone */ } }
+            activeReq = null;
+            popup.classList.remove('is-open');
+        }
 
-            link.addEventListener('mouseenter', (e) => {
-                if (!getSetting('eh_gallery_peeker', true)) return;
+        function render(data) {
+            titleEl.textContent = data.title;
 
-                clearTimeout(peekHoverTimeout);
-                peekHoverTimeout = setTimeout(() => {
-                    showGalleryPeek(galleryUrl, e.clientX, e.clientY);
-                }, 100);
-            });
+            const bits = [];
+            if (data.category) bits.push(['Category', data.category]);
+            if (data.rating) bits.push(['Rating', '★ ' + data.rating]);
+            if (data.language) bits.push(['Language', data.language]);
+            if (data.length) bits.push(['Pages', data.length]);
+            if (data.fileSize) bits.push(['Size', data.fileSize]);
+            if (data.uploader) bits.push(['By', data.uploader]);
 
-            link.addEventListener('mousemove', (e) => {
-                if (peekPopupEl.style.display === 'block') {
-                    positionPopupAtCursor(peekPopupEl, e.clientX, e.clientY, 470, 380);
-                }
-            });
+            metaEl.textContent = '';
+            for (const [k, v] of bits) {
+                const span = document.createElement('span');
+                span.append(k + ': ');
+                const b = document.createElement('b');
+                b.textContent = v;
+                span.appendChild(b);
+                metaEl.appendChild(span);
+            }
 
-            link.addEventListener('mouseleave', () => {
-                clearTimeout(peekHoverTimeout);
-                if (activePeekReq && typeof activePeekReq.abort === 'function') {
-                    try { activePeekReq.abort(); } catch(e) {}
-                }
-                activePeekReq = null;
-                peekPopupEl.style.display = 'none';
-            });
-        });
+            tagsEl.textContent = '';
+            tagsEl.style.display = data.tags.length ? 'flex' : 'none';
+            for (const tag of data.tags) {
+                const t = document.createElement('span');
+                t.className = 'eh-peek-tag';
+                t.textContent = tag;
+                tagsEl.appendChild(t);
+            }
 
-        function showGalleryPeek(url, clientX, clientY) {
-            titleEl.innerText = 'Loading gallery...';
-            metaEl.innerHTML = '<span>Fetching info...</span>';
-            gridEl.innerHTML = Array(8).fill('<div class="eh-peek-thumb skeleton"></div>').join('');
-            peekPopupEl.style.display = 'block';
-
-            positionPopupAtCursor(peekPopupEl, clientX, clientY, 470, 380);
-
-            if (galleryPeekCache.has(url)) {
-                const data = galleryPeekCache.get(url);
-                renderPeekData(data);
+            gridEl.textContent = '';
+            if (!data.thumbs.length) {
+                const empty = document.createElement('div');
+                empty.className = 'eh-peek-empty';
+                empty.textContent = 'No preview thumbnails available';
+                gridEl.appendChild(empty);
+                reposition();
                 return;
             }
 
-            activePeekReq = GM_xmlhttpRequest({
-                method: 'GET',
-                url: url,
-                onload(res) {
-                    if (res.status === 200) {
-                        const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
-                        const titleEn = doc.querySelector('#gn')?.textContent || '';
-                        const titleJp = doc.querySelector('#gj')?.textContent || '';
-                        const title = titleEn || titleJp || 'ExHentai Gallery';
-
-                        const catEl = doc.querySelector('.cs') || doc.querySelector('#gdc');
-                        const category = catEl ? catEl.textContent.trim() : '';
-
-                        // Extract Uploader & Artist
-                        const uploader = doc.querySelector('#gdn a')?.textContent?.trim() || doc.querySelector('#gdn')?.textContent?.trim() || '';
-
-                        // Extract Table data (#gdd)
-                        const gddRows = Array.from(doc.querySelectorAll('#gdd tr'));
-                        const getGddVal = (label) => {
-                            const row = gddRows.find(tr => tr.textContent.includes(label));
-                            return row ? row.querySelector('.gdt2')?.textContent?.trim() : '';
-                        };
-
-                        const language = (getGddVal('Language:') || '').replace(/\s+/g, ' ').trim();
-                        const fileSize = getGddVal('File Size:');
-                        const lengthText = getGddVal('Length:');
-
-                        // Extract sprite/image thumbnail info accurately from #gdt
-                        const thumbNodes = Array.from(doc.querySelectorAll('#gdt .gdtm, #gdt .gdtl, #gdt > a, #gdt > div'));
-                        const thumbs = [];
-
-                        for (const node of thumbNodes) {
-                            const bgEl = node.querySelector('div[style*="background"], div[title*="Page"], div[style*="url"]') ||
-                                         (node.getAttribute('style')?.includes('background') ? node : null);
-                            const imgEl = node.querySelector('img');
-
-                            if (bgEl) {
-                                const style = bgEl.getAttribute('style') || '';
-                                const wMatch = style.match(/width:\s*(\d+)px/i);
-                                const hMatch = style.match(/height:\s*(\d+)px/i);
-                                const w = wMatch ? parseInt(wMatch[1], 10) : 200;
-                                const h = hMatch ? parseInt(hMatch[1], 10) : 280;
-
-                                thumbs.push({ type: 'sprite', style, w, h });
-                            } else if (imgEl && imgEl.src) {
-                                thumbs.push({ type: 'img', src: imgEl.src });
-                            }
-                            if (thumbs.length >= 8) break;
-                        }
-
-                        const peekData = {
-                            title,
-                            category,
-                            uploader,
-                            language,
-                            fileSize,
-                            lengthText,
-                            thumbs
-                        };
-
-                        galleryPeekCache.set(url, peekData);
-                        if (peekPopupEl.style.display === 'block') {
-                            renderPeekData(peekData);
-                        }
-                    }
-                }
-            });
-        }
-
-        function renderPeekData(data) {
-            titleEl.innerText = data.title;
-            metaEl.innerHTML = `
-                <span>Category: <b>${data.category || 'Manga'}</b></span>
-                ${data.uploader ? `<span>Uploader: <b>${data.uploader}</b></span>` : ''}
-                ${data.language ? `<span>Language: <b>${data.language}</b></span>` : ''}
-                ${data.fileSize ? `<span>Size: <b>${data.fileSize}</b></span>` : ''}
-                ${data.lengthText ? `<span>Pages: <b>${data.lengthText}</b></span>` : ''}
-            `;
-
-            gridEl.innerHTML = '';
-            data.thumbs.forEach(t => {
+            const cells = [];
+            for (const t of data.thumbs) {
                 const cell = document.createElement('div');
                 cell.className = 'eh-peek-thumb';
-                if (t.type === 'sprite') {
-                    const scale = 105 / (t.w || 200);
-                    const spriteDiv = document.createElement('div');
-                    spriteDiv.setAttribute('style', `${t.style}; transform: scale(${scale}); transform-origin: 0 0; pointer-events: none; flex-shrink: 0;`);
-                    cell.appendChild(spriteDiv);
-                } else if (t.type === 'img') {
-                    const img = document.createElement('img');
-                    img.src = t.src;
-                    img.style.cssText = 'width:100%; height:100%; object-fit:contain; display:block;';
-                    cell.appendChild(img);
+
+                if (t.type === 'img') {
+                    const im = document.createElement('img');
+                    im.loading = 'lazy';
+                    im.decoding = 'async';
+                    im.src = t.src;
+                    im.alt = '';
+                    cell.appendChild(im);
+                } else {
+                    const sprite = document.createElement('div');
+                    sprite.className = 'eh-sprite';
+                    sprite.style.width = t.w + 'px';
+                    sprite.style.height = t.h + 'px';
+                    sprite.style.backgroundImage = `url("${t.url}")`;
+                    sprite.style.backgroundPosition = `${t.offset[0]}px ${t.offset[1]}px`;
+                    cell.appendChild(sprite);
+                    cells.push({ cell, sprite, t });
                 }
                 gridEl.appendChild(cell);
+            }
+
+            // One batched read, then one batched write: no layout thrash.
+            const widths = cells.map(c => c.cell.clientWidth);
+            cells.forEach(({ sprite, t }, i) => {
+                const scale = (widths[i] || 105) / t.w;
+                sprite.style.transform = `translate(-50%, -50%) scale(${scale.toFixed(3)})`;
             });
+
+            reposition();
         }
+
+        function open(url) {
+            if (openUrl === url) return;
+            openUrl = url;
+            const myToken = ++token;
+
+            popup.classList.add('is-open');
+            reposition();
+
+            const cached = peekCache.get(url);
+            if (cached) { render(cached); return; }
+
+            titleEl.textContent = 'Loading…';
+            metaEl.textContent = 'fetching info…';
+            tagsEl.textContent = '';
+            skeleton();
+
+            activeReq = gmRequest({ url });
+            activeReq
+                .then(res => {
+                    if (myToken !== token) return;
+                    if (res.status !== 200) throw new EhError('http', 'HTTP ' + res.status);
+                    const doc = new DOMParser().parseFromString(res.responseText, 'text/html');
+                    const data = extractPeekData(doc);
+                    peekCache.set(url, data);
+                    render(data);
+                })
+                .catch(err => {
+                    if (myToken !== token || (err && err.kind === 'abort')) return;
+                    titleEl.textContent = 'Preview unavailable';
+                    metaEl.textContent = err && err.message ? err.message : '';
+                    gridEl.textContent = '';
+                })
+                .finally(() => { activeReq = null; });
+        }
+
+        // A single delegated pair of listeners covers every gallery link on
+        // the page, including ones added by later pagination.
+        document.addEventListener('pointerover', e => {
+            if (!peekerEnabled) return;
+            const link = e.target.closest && e.target.closest('a[href*="/g/"]');
+            if (!link || popup.contains(link)) return;
+
+            const m = link.href.match(/(https?:\/\/[^/]+\/g\/\d+\/[0-9a-fA-F]+\/)/);
+            if (!m) return;
+
+            cursor = { x: e.clientX, y: e.clientY };
+            clearTimeout(hoverTimer);
+            hoverTimer = setTimeout(() => open(m[1]), 140);
+        }, { passive: true });
+
+        document.addEventListener('pointermove', e => {
+            if (!popup.classList.contains('is-open')) return;
+            cursor = { x: e.clientX, y: e.clientY };
+            reposition();
+        }, { passive: true });
+
+        document.addEventListener('pointerout', e => {
+            const link = e.target.closest && e.target.closest('a[href*="/g/"]');
+            if (!link) return;
+            const to = e.relatedTarget;
+            if (to && to.closest && to.closest('a[href*="/g/"]') === link) return;
+            close();
+        }, { passive: true });
+
+        window.addEventListener('scroll', close, { passive: true });
+        window.addEventListener('blur', close);
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') close(); });
     }
 
-    function createFrontPageBar() {
-        if (document.getElementById('eh-top-control-bar')) return;
+    function buildFrontPageBar() {
+        if ($('#eh-top-control-bar')) return;
 
-        const mainTable = document.querySelector('table.itg, div.itg, #searchbox');
-        if (!mainTable) return;
+        const anchor = $('table.itg') || $('div.itg') || $('#searchbox');
+        if (!anchor || !anchor.parentNode) return;
 
-        const openInNewTab = getSetting('eh_open_in_new_tab', true);
-        const peekerEnabled = getSetting('eh_gallery_peeker', true);
+        const openNewTab = getSetting('eh_open_in_new_tab', true);
+        const peeker = getSetting('eh_gallery_peeker', true);
 
         const bar = document.createElement('div');
         bar.id = 'eh-top-control-bar';
         bar.innerHTML = `
             <div class="eh-top-left">
-                <label class="eh-checkbox-label" title="Controls whether clicking galleries opens them in a new tab">
-                    <input type="checkbox" id="eh-setting-new-tab" ${openInNewTab ? 'checked' : ''}>
-                    <span>Open in new tab</span>
+                <label class="eh-checkbox-label${openNewTab ? ' is-on' : ''}" title="Open galleries in a new tab">
+                    <input type="checkbox" id="eh-setting-new-tab" ${openNewTab ? 'checked' : ''}>
+                    <span>New tab</span>
                 </label>
-                <label class="eh-checkbox-label" title="Show floating preview with static thumbnail overview when hovering over galleries">
-                    <input type="checkbox" id="eh-setting-peeker" ${peekerEnabled ? 'checked' : ''}>
-                    <span>📑 Gallery Peeker</span>
+                <label class="eh-checkbox-label${peeker ? ' is-on' : ''}" title="Show a floating gallery preview on hover">
+                    <input type="checkbox" id="eh-setting-peeker" ${peeker ? 'checked' : ''}>
+                    <span>📑 Gallery peeker</span>
                 </label>
-                <div class="eh-quota-badge">
-                    <span id="eh-quota-value">Image Limits: <i>Checking...</i></span>
+                <div class="eh-badge eh-quota-badge">
+                    <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
                     <span id="eh-quota-timer" class="eh-timer-badge">⏱ 60s</span>
                 </div>
             </div>
-            <div class="eh-top-right">ExH Downloader v13.3</div>
-        `;
+            <div class="eh-top-right">
+                <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer">ExH Downloader v${VERSION}</a>
+            </div>`;
+        anchor.parentNode.insertBefore(bar, anchor);
 
-        mainTable.parentNode.insertBefore(bar, mainTable);
-
-        const cb = bar.querySelector('#eh-setting-new-tab');
-        cb.addEventListener('change', e => {
+        const newTabCb = $('#eh-setting-new-tab', bar);
+        newTabCb.addEventListener('change', e => {
             setSetting('eh_open_in_new_tab', e.target.checked);
+            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
             applyNewTabBehavior(e.target.checked);
         });
 
-        const pcb = bar.querySelector('#eh-setting-peeker');
-        pcb.addEventListener('change', e => {
-            setSetting('eh_gallery_peeker', e.target.checked);
+        const peekCb = $('#eh-setting-peeker', bar);
+        peekCb.addEventListener('change', e => {
+            peekerEnabled = e.target.checked;
+            setSetting('eh_gallery_peeker', peekerEnabled);
+            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', peekerEnabled);
         });
 
-        fetchImageLimits();
-        initIdlePolling();
-        applyNewTabBehavior(openInNewTab);
+        applyNewTabBehavior(openNewTab);
+        Quota.start(() => false);
     }
 
-    // === Entry Point / Bootstrap ===
+    // =====================================================================
+    // === BOOTSTRAP =======================================================
+    // =====================================================================
     function bootstrap() {
-        const path = window.location.pathname;
-        if (path.startsWith('/s/')) {
-            initViewerPage();
-        } else if (path.startsWith('/g/')) {
-            initGalleryPage();
-        } else {
-            initFrontPagePeeker();
+        const path = location.pathname;
+        try {
+            if (path.startsWith('/s/')) {
+                initViewerPage();
+            } else if (path.startsWith('/g/')) {
+                initGalleryPage();
+            } else if (path.startsWith('/mpv/')) {
+                // The multi-page viewer has its own downloader; stay out of it.
+            } else if ($$('a[href*="/g/"]').length) {
+                buildFrontPageBar();
+                initFrontPagePeeker();
+            }
+        } catch (err) {
+            console.error('[ExHD] initialisation failed', err);
         }
     }
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', bootstrap);
+        document.addEventListener('DOMContentLoaded', bootstrap, { once: true });
     } else {
         bootstrap();
     }
-
 })();
