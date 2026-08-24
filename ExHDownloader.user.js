@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.2.0
+// @version      15.5.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -25,7 +25,7 @@
 (function () {
     'use strict';
 
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.1.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.5.0';
     const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
 
     // =====================================================================
@@ -274,10 +274,16 @@
            animation layer -- both would anchor to the taller cell instead
            and drift down onto the page caption. The button carries a title
            of its own, hence the :not(). */
-        #gdt .gdtl, #gdt .gdtm > div, #gdt .gdtm,
-        .gt100 > a > div, .gt200 > a > div, .gt400 > a > div,
-        #gdt > a > div,
-        #gdt div[title]:not(.eh-dl-btn) {
+        /* [data-eh] marks everything this script injects. Excluding it here
+           is essential, not cosmetic: giving an overlay a tooltip sets a
+           title attribute, which would otherwise make it match this very
+           rule and be forced back to position:relative -- at specificity
+           (1,2,1), beating the overlay's own styling. That is exactly how
+           the format badge ended up stretched across the top of thumbnails. */
+        #gdt .gdtl:not([data-eh]), #gdt .gdtm > div:not([data-eh]), #gdt .gdtm:not([data-eh]),
+        .gt100 > a > div:not([data-eh]), .gt200 > a > div:not([data-eh]), .gt400 > a > div:not([data-eh]),
+        #gdt > a > div:not([data-eh]),
+        #gdt div[title]:not([data-eh]):not(.eh-dl-btn) {
             position: relative !important;
             overflow: hidden !important;
             border-radius: var(--eh-radius) !important;
@@ -294,47 +300,140 @@
             animation: ehShimmer 1.3s infinite linear;
             z-index: 8; pointer-events: none; border-radius: inherit;
         }
-        .eh-thumb-spinner {
-            position: absolute; bottom: 6px; left: 6px;
-            background: rgba(22, 64, 36, .94);
-            border: 1px solid var(--eh-ok);
-            color: var(--eh-ok-dim);
-            font-size: 10px; font-weight: bold;
-            padding: 2px 6px; border-radius: 2px;
-            z-index: 9; display: flex; align-items: center; gap: 4px;
-            pointer-events: none; user-select: none;
-            box-shadow: 0 2px 6px rgba(0,0,0,.7);
+        /* ----------------------------------------------------------------
+           Overlay system.
+
+           The site styles its own thumbnail furniture with rules keyed on
+           the last child of a thumbnail box -- roughly
+              .gt200 div > div:last-child { position: relative; top: -4px }
+           Anything appended to that box becomes the last child and inherits
+           it, which is what dragged the format badge out of its corner and
+           stretched it across the top of the picture.
+
+           Two defences, both required:
+             1. every selector here is prefixed with #gdt, so ID specificity
+                beats any class/element rule the site can write;
+             2. every offset is stated explicitly -- setting only bottom and
+                right let the site's top/left leak through.
+           Indicators are also laid out as static children of one positioned
+           slot, so stray top/left declarations cannot move them at all.
+           ---------------------------------------------------------------- */
+
+        /* Indicators sit opposite the download button, whatever corner it
+           is configured to use, so the two never overlap. */
+        :root { --eh-slot-top: 5px; --eh-slot-bottom: auto; }
+        :root[data-eh-btnpos="top"],
+        :root[data-eh-btnpos="tl"],
+        :root[data-eh-btnpos="tr"] { --eh-slot-top: auto; --eh-slot-bottom: 5px; }
+
+        #gdt .eh-overlay {
+            position: absolute !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+            margin: 0 !important; padding: 0 !important;
+            border: 0 !important; background: none !important;
+            pointer-events: none !important;
+            z-index: 9 !important;
+            border-radius: inherit !important;
+            overflow: hidden !important;
+        }
+        #gdt .eh-overlay-slot {
+            position: absolute !important;
+            top: var(--eh-slot-top) !important;
+            bottom: var(--eh-slot-bottom) !important;
+            left: 5px !important; right: auto !important;
+            display: flex !important; align-items: center !important; gap: 4px !important;
+            max-width: calc(100% - 10px) !important;
+            margin: 0 !important; padding: 0 !important;
+        }
+
+        /* One chip per thumbnail, carrying the whole lifecycle. Static
+           positioning makes any inherited top/left simply inert. */
+        #gdt .eh-chip {
+            position: static !important;
+            top: auto !important; right: auto !important; bottom: auto !important; left: auto !important;
+            display: inline-flex !important; align-items: center !important; gap: 4px !important;
+            width: auto !important; height: auto !important;
+            margin: 0 !important; padding: 2px 6px !important;
+            border: 1px solid transparent !important; border-radius: 2px !important;
+            font-family: var(--eh-font) !important;
+            font-size: 10px !important; font-weight: bold !important;
+            line-height: 1 !important; letter-spacing: .3px !important;
+            white-space: nowrap !important; text-transform: none !important;
+            overflow: hidden !important; text-overflow: ellipsis !important;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, .7) !important;
+            user-select: none !important; pointer-events: none !important;
+            font-variant-numeric: tabular-nums;
             animation: ehFadeScaleIn .15s ease-out;
         }
+        #gdt .eh-chip.is-finding,
+        #gdt .eh-chip.is-loading {
+            background: rgba(20, 45, 70, .95) !important;
+            border-color: #2c6ea8 !important; color: #8fc4ec !important;
+        }
+        #gdt .eh-chip.is-playing {
+            background: rgba(22, 64, 36, .95) !important;
+            border-color: #27ae60 !important; color: #7ee2a8 !important;
+        }
+        #gdt .eh-chip.is-paused {
+            background: rgba(52, 55, 62, .95) !important;
+            border-color: #6b7079 !important; color: #c6cad2 !important;
+        }
+        #gdt .eh-chip.is-error {
+            background: rgba(90, 25, 25, .96) !important;
+            border-color: var(--eh-danger) !important; color: #ffb3aa !important;
+            pointer-events: auto !important; cursor: pointer !important;
+        }
+        #gdt .eh-chip.is-error:hover { background: rgba(130, 40, 40, .96) !important; color: #fff !important; }
+        #gdt .eh-chip.is-oversize {
+            background: rgba(74, 51, 18, .96) !important;
+            border-color: #7a5a20 !important; color: #e8c98a !important;
+            pointer-events: auto !important; cursor: pointer !important;
+        }
+        #gdt .eh-chip.is-oversize:hover { background: rgba(99, 67, 15, .96) !important; color: #fff !important; }
+        /* A settled thumbnail keeps its chip, but quietly; hovering the cell
+           brings it back to full strength. */
+        #gdt .eh-chip.is-playing, #gdt .eh-chip.is-paused { opacity: .72; transition: opacity .15s; }
+        #gdt a:hover .eh-chip, #gdt > *:hover .eh-chip { opacity: 1; }
+
+        /* Byte-accurate progress hugging the bottom edge. It sits below any
+           button position, so it never collides with one. */
+        #gdt .eh-thumb-bar {
+            position: absolute !important;
+            top: auto !important; left: 0 !important; right: 0 !important; bottom: 0 !important;
+            width: auto !important; height: 3px !important;
+            margin: 0 !important; padding: 0 !important;
+            background: rgba(0, 0, 0, .55) !important;
+            pointer-events: none !important;
+        }
+        #gdt .eh-thumb-bar > i {
+            display: block !important; height: 100% !important; width: 0;
+            background: linear-gradient(90deg, #1f8a4d, var(--eh-ok)) !important;
+            transition: width .15s linear;
+        }
+
         /* The live layer and its frozen canvas twin share one box so the
            swap between them is a pure opacity change, never a reflow. */
-        .eh-live-layer {
-            position: absolute !important; inset: 0 !important;
+        #gdt .eh-live-layer {
+            position: absolute !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+            margin: 0 !important; padding: 0 !important;
             z-index: 5 !important; border-radius: inherit !important;
             pointer-events: none !important;
             opacity: 0; transition: opacity .22s ease-in;
         }
-        .eh-live-layer.is-shown { opacity: 1; }
-        .eh-live-layer > img, .eh-live-layer > canvas {
-            position: absolute; inset: 0;
-            width: 100%; height: 100%;
-            object-fit: contain;
-            border-radius: inherit;
-            background: rgba(0, 0, 0, .15);
+        #gdt .eh-live-layer.is-shown { opacity: 1; }
+        #gdt .eh-live-layer > img, #gdt .eh-live-layer > canvas {
+            position: absolute !important;
+            top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important;
+            width: 100% !important; height: 100% !important;
+            margin: 0 !important;
+            object-fit: contain !important;
+            border-radius: inherit !important;
+            background: rgba(0, 0, 0, .15) !important;
         }
-        .eh-live-layer > canvas { display: none; }
-        .eh-live-layer.is-frozen > img    { visibility: hidden; }
-        .eh-live-layer.is-frozen > canvas { display: block; }
-        .eh-anim-badge {
-            position: absolute !important; bottom: 4px !important; right: 4px !important;
-            background: rgba(39, 174, 96, .92) !important; color: #fff !important;
-            font-size: 9px !important; font-weight: bold !important;
-            padding: 2px 4px !important; border-radius: 2px !important;
-            z-index: 10 !important; pointer-events: none !important;
-            line-height: 1 !important; letter-spacing: .5px !important;
-            box-shadow: 0 1px 3px rgba(0,0,0,.75) !important; user-select: none !important;
-        }
-        .eh-anim-badge.is-frozen { background: rgba(90, 95, 105, .92) !important; }
+        #gdt .eh-live-layer > canvas { display: none !important; }
+        #gdt .eh-live-layer.is-frozen > img    { visibility: hidden !important; }
+        #gdt .eh-live-layer.is-frozen > canvas { display: block !important; }
 
         /* ---------- Download button placement ---------- */
         /* One attribute on <html> restyles every button at once, so changing
@@ -374,6 +473,8 @@
         }
         .eh-anim-status-badge.is-done .eh-anim-count { color: var(--eh-text); }
         .eh-anim-status-badge.is-error { border-color: var(--eh-danger); background: rgba(90,25,25,.5); color: #ffb3aa; }
+        .eh-anim-status-badge.is-paused { cursor: pointer; border-color: var(--eh-warn); background: rgba(74,51,18,.6); color: #e8c98a; }
+        .eh-anim-status-badge.is-paused:hover { background: rgba(99,67,15,.75); color: #fff; }
 
         /* ---------- Settings panel ---------- */
         #eh-settings-panel {
@@ -437,6 +538,19 @@
             font-family: var(--eh-font); cursor: pointer;
         }
         .eh-set-danger:hover { background: #822e2e; color: #fff; }
+        .eh-set-text {
+            width: 100%; box-sizing: border-box; height: var(--eh-ctl-h);
+            padding: 0 8px; background: var(--eh-panel-sunken);
+            border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            color: var(--eh-text); font-family: var(--eh-font); font-size: 12px;
+        }
+        .eh-set-text:focus { outline: 2px solid var(--eh-ok); outline-offset: 1px; }
+        .eh-set-preview {
+            font-size: 11px; color: var(--eh-ok-dim); background: var(--eh-panel-sunken);
+            border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
+            padding: 5px 8px; word-break: break-all; line-height: 1.4;
+        }
+        .eh-set-preview.is-bad { color: #ffb3aa; border-color: var(--eh-danger); }
 
         /* ---------- Download manager ---------- */
         #eh-dl-manager {
@@ -640,6 +754,40 @@
             background-size: 200% 100%; animation: ehShimmer 1.4s infinite linear;
         }
         .eh-peek-empty { grid-column: 1 / -1; text-align: center; color: var(--eh-text-dim); padding: 24px 0; }
+
+        /* ---------- What's-new notice ---------- */
+        #eh-whatsnew {
+            position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+            z-index: 100002; width: 440px; max-width: calc(100vw - 24px);
+            background: var(--eh-panel); border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius); box-shadow: 0 10px 34px var(--eh-shadow);
+            font-family: var(--eh-font); font-size: 12px; color: var(--eh-text);
+            animation: ehFadeScaleIn .18s cubic-bezier(.16,1,.3,1);
+        }
+        #eh-whatsnew .eh-wn-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 10px; background: var(--eh-panel-raised);
+            border-bottom: 1px solid var(--eh-line); font-weight: bold;
+        }
+        #eh-whatsnew .eh-wn-ver { color: var(--eh-ok-dim); font-weight: bold; }
+        #eh-whatsnew .eh-wn-body { padding: 9px 12px 4px; max-height: 46vh; overflow-y: auto; }
+        #eh-whatsnew h4 {
+            margin: 10px 0 4px; font-size: 11px; color: var(--eh-text-dim);
+            text-transform: uppercase; letter-spacing: .5px; font-weight: bold;
+        }
+        #eh-whatsnew h4:first-child { margin-top: 0; }
+        #eh-whatsnew ul { margin: 0 0 6px; padding-left: 16px; }
+        #eh-whatsnew li { margin: 3px 0; line-height: 1.45; }
+        #eh-whatsnew li b { color: var(--eh-ok-dim); }
+        #eh-whatsnew .eh-wn-foot {
+            display: flex; justify-content: space-between; align-items: center;
+            gap: 8px; padding: 8px 10px; border-top: 1px solid var(--eh-line);
+        }
+        #eh-whatsnew .eh-wn-older {
+            background: none; border: none; color: var(--eh-text-dim);
+            font-family: var(--eh-font); font-size: 11px; cursor: pointer; padding: 0; text-decoration: underline;
+        }
+        #eh-whatsnew .eh-wn-older:hover { color: var(--eh-text); }
     `;
 
     if (typeof GM_addStyle === 'function') {
@@ -765,7 +913,10 @@
         eh_btn_pos: 'bottom',
         eh_btn_hover: false,
         eh_anim_play_budget: 4,
-        eh_anim_concurrency: 2
+        eh_anim_concurrency: 2,
+        eh_anim_size_cap_mb: 8,
+        eh_preview_size_cap_mb: 24,
+        eh_filename_template: '{title} - {num}.{ext}'
     };
 
     const pref = key => getSetting(key, DEFAULTS[key]);
@@ -873,6 +1024,34 @@
         return sanitizeFilename(src);
     }
 
+    /**
+     * Read the viewer's "page / total" counter.
+     *
+     * #i2 holds the counter and the filename line as sibling divs, and
+     * textContent glues them with no separator. On a gallery whose files are
+     * named 006.jpg that yields "6 / 129006.jpg", and a greedy \d+ happily
+     * reports 129006 pages. So never match across the whole node: prefer the
+     * child that is exactly "N / M", and otherwise scope the loose match to
+     * the counter div alone.
+     */
+    function readPageNav(root) {
+        const scope = root || document;
+        const i2 = scope.querySelector ? scope.querySelector('#i2') : null;
+        if (!i2) return null;
+
+        for (const el of i2.children) {
+            const m = (el.textContent || '').trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+            if (m) return { page: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+        }
+
+        const nav = i2.querySelector('.sn');
+        if (nav) {
+            const m = (nav.textContent || '').match(/(\d+)\s*\/\s*(\d+)/);
+            if (m) return { page: parseInt(m[1], 10), total: parseInt(m[2], 10) };
+        }
+        return null;
+    }
+
     /** Total pages, used only to pick a sane zero-pad width. */
     function getGalleryPageCount() {
         const gdd = $$('#gdd tr').find(tr => /Length:/i.test(tr.textContent));
@@ -880,11 +1059,8 @@
             const m = gdd.textContent.match(/(\d+)\s*page/i);
             if (m) return parseInt(m[1], 10);
         }
-        const i2 = $('#i2');
-        if (i2) {
-            const m = i2.textContent.match(/(\d+)\s*\/\s*(\d+)/);
-            if (m) return parseInt(m[2], 10);
-        }
+        const nav = readPageNav();
+        if (nav) return nav.total;
         const gpc = $('.gpc');
         if (gpc) {
             const m = gpc.textContent.match(/of\s+([\d,]+)\s+images/i);
@@ -895,6 +1071,82 @@
 
     function padWidthFor(total) {
         return total > 999 ? 4 : 3;
+    }
+
+    /** "[Artist] Title (Series)" is the house convention for gallery names. */
+    function artistFromTitle(title) {
+        const m = String(title || '').match(/^\s*[\[(]\s*([^\])]+?)\s*[\])]/);
+        if (!m) return '';
+        // "[Group (Artist)]" -> prefer the artist in the inner brackets.
+        const inner = m[1].match(/\(([^)]+)\)\s*$/);
+        return sanitizeFilename(inner ? inner[1] : m[1], 60);
+    }
+
+    const FILENAME_TOKENS = ['title', 'name', 'artist', 'num', 'page', 'total', 'gid', 'res', 'orig', 'ext'];
+
+    /**
+     * Expand the user's filename template.
+     *
+     * A forward slash is kept as a real path separator, because Chrome's
+     * download attribute honours sub-directories -- that is what makes
+     * "one folder per gallery" templates work. Each segment is sanitised on
+     * its own so the separator survives, and traversal segments are dropped.
+     */
+    function buildFilename(template, vars) {
+        const ext = (vars.ext || 'jpg').toLowerCase();
+        const expanded = String(template || DEFAULTS.eh_filename_template)
+            .replace(/\{(\w+)\}/g, (whole, key) => {
+                const k = key.toLowerCase();
+                if (k === 'ext') return '';                 // appended at the end
+                if (!FILENAME_TOKENS.includes(k)) return whole;
+                const v = vars[k];
+                // Slashes inside a value must not invent new folders.
+                return v === undefined || v === null
+                    ? ''
+                    : sanitizeFilename(String(v).replace(/[/\\]/g, '_'), 80);
+            })
+            .replace(/\.\s*$/, '')
+            .trim();
+
+        // Sanitise segments without the "" -> default-name fallback, or a
+        // traversal segment would come back as a real folder called
+        // ExHentai_Gallery instead of being dropped.
+        const segments = expanded
+            .split('/')
+            .map(s => String(s).replace(/\p{Cc}/gu, '').replace(/[\\:*?"<>|]/g, '_')
+                               .replace(/\s+/g, ' ').trim().replace(/[. ]+$/, ''))
+            .filter(Boolean)
+            .map(s => (WINDOWS_RESERVED.test(s) ? '_' + s : s).slice(0, 80).replace(/[. ]+$/, ''))
+            .filter(Boolean);
+
+        if (!segments.length) return `image.${ext}`;
+
+        const last = segments.pop();
+        const stem = sanitizeFilename(last, Math.max(16, 120 - ext.length));
+        segments.push(stem);
+
+        let out = segments.join('/');
+        if (out.length > 200) out = out.slice(out.length - 200).replace(/^[^/]*\//, '');
+        return `${out}.${ext}`;
+    }
+
+    function filenameVars({ title, page, total, gid, res, origName, ext }) {
+        const pad = padWidthFor(total || 0);
+        // {title} keeps the site's full name, which already begins with the
+        // artist bracket; {name} drops it so "{artist}/{name}" reads cleanly.
+        const bare = String(title || '').replace(/^\s*[\[(][^\])]*[\])]\s*/, '').trim();
+        return {
+            title: title || 'ExHentai_Gallery',
+            name: sanitizeFilename(bare || title || 'Gallery', 100),
+            artist: artistFromTitle(title),
+            num: String(page).padStart(pad, '0'),
+            page: String(page),
+            total: String(total || ''),
+            gid: String(gid || ''),
+            res: res || '',
+            orig: origName ? origName.replace(/\.[^.]+$/, '') : '',
+            ext
+        };
     }
 
     // =====================================================================
@@ -911,6 +1163,7 @@
     }
 
     const QUOTA_HALT = 'quota';
+    const OVERSIZE = 'oversize';
 
     function gmRequest(opts) {
         let handle = null;
@@ -960,7 +1213,14 @@
         throw lastErr;
     }
 
-    const QUOTA_TEXT = /(exceeded your image viewing limits|bandwidth exceeded|509)/i;
+    /**
+     * The bandwidth notice is served as an image literally named 509.gif.
+     * Match that filename and nothing else: H@H URLs carry long digit runs
+     * in their hash and port, so a bare "509" substring test condemns
+     * perfectly good images. That false positive used to halt the whole
+     * loader on any page whose URL happened to contain those three digits.
+     */
+    const QUOTA_SENTINEL_URL = /\/509s?\.(?:gif|png|jpe?g)(?:[?#]|$)/i;
 
     /** Fetch and parse an HTML document, detecting the quota interstitial. */
     async function fetchDocument(url, opts = {}) {
@@ -1024,6 +1284,17 @@
         return e === 'jpeg' ? 'jpg' : e;
     }
 
+    /** The source filename, for the {orig} template token. */
+    function origNameFromViewerDoc(doc) {
+        const i2 = doc.querySelector('#i2');
+        if (!i2) return null;
+        for (const el of i2.children) {
+            const m = (el.textContent || '').trim().match(/^(.+?\.[a-z0-9]{2,5})\s*::/i);
+            if (m) return m[1].trim();
+        }
+        return null;
+    }
+
     /** The viewer prints the true source filename in the first line of #i2. */
     function extFromViewerDoc(doc) {
         const i2 = doc.querySelector('#i2');
@@ -1034,12 +1305,32 @@
         return m ? m[1].toLowerCase().replace(/^jpeg$/, 'jpg') : null;
     }
 
-    function isQuotaBlob(blob, res) {
-        if (!blob || blob.size === 0) return true;
+    /**
+     * Separate a real limit notice from an ordinary failure. Only the first
+     * deserves halting everything; an empty or malformed reply is transient
+     * and should simply be retried.
+     */
+    function classifyImageResponse(blob, res) {
+        if (res.status === 509) return 'quota';
+        if (QUOTA_SENTINEL_URL.test(res.finalUrl || '')) return 'quota';
+        if (!blob) return 'empty';
         const type = (blob.type || '').toLowerCase();
-        if (type.startsWith('text/') || type === 'application/xhtml+xml') return true;
-        if (QUOTA_TEXT.test(res.finalUrl || '')) return true;
-        return false;
+        if (type.startsWith('text/') || type === 'application/xhtml+xml') return 'html';
+        if (blob.size === 0) return 'empty';
+        return 'ok';
+    }
+
+    function assertRealImage(blob, res) {
+        switch (classifyImageResponse(blob, res)) {
+            case 'quota':
+                throw new EhError(QUOTA_HALT, 'Image / bandwidth limit reached');
+            case 'html':
+                throw new EhError('http', 'Server returned a page instead of an image');
+            case 'empty':
+                throw new EhError('network', 'Empty response');
+            default:
+                return true;
+        }
     }
 
     /** Download bytes, verifying we actually received an image. */
@@ -1058,9 +1349,7 @@
         if (res.status !== 200) throw new EhError('http', `HTTP ${res.status}`, res.status);
 
         const blob = res.response;
-        if (isQuotaBlob(blob, res)) {
-            throw new EhError(QUOTA_HALT, 'Server returned a limit notice instead of the image');
-        }
+        assertRealImage(blob, res);
         return { blob, res };
     }
 
@@ -1238,7 +1527,8 @@
             displayRes: shownRes ? shownRes.replace(/\s/g, '') : null,
             sizeText: sizeText || null,
             fileExt: extFromViewerDoc(doc),
-            pageCount: (i2Text.match(/\d+\s*\/\s*(\d+)/) || [])[1]
+            origName: origNameFromViewerDoc(doc),
+            pageCount: (readPageNav(doc) || {}).total || null
         };
     }
 
@@ -1307,7 +1597,9 @@
             mountBudget: 14,         // decoded <img> elements kept alive
             evictDistanceVh: 2,      // drop the <img> past this many viewports
             rootMargin: '300px 0px',
-            frozenFrameMax: 512      // cap for the still-frame canvas
+            frozenFrameMax: 512,     // cap for the still-frame canvas
+            taskTimeoutMs: 90000,    // a task holding a slot longer is stalled
+            seedDelayMs: 900         // fallback if the observer never fires
         };
 
         const STATIC_EXTS = new Set(['jpg', 'jpeg', 'png', 'bmp', 'avif', 'heic']);
@@ -1324,6 +1616,26 @@
         let galleryIsAnimated = null;
         let resizeTimer = null;
         let pinnedState = null;
+        let watchdogId = null;
+        let seedTimer = null;
+
+        /** 0 disables the cap entirely. */
+        function sizeCapBytes() {
+            const mb = clamp(pref('eh_anim_size_cap_mb'), 0, 512);
+            return mb > 0 ? mb * 1024 * 1024 : 0;
+        }
+
+        /**
+         * Decoding a large animated WebP blocks the main thread, so never let
+         * two run at once. Galleries of 60 MB HD animations froze the tab
+         * outright before this existed.
+         */
+        let decodeChain = Promise.resolve();
+        function queueDecode(fn) {
+            const run = decodeChain.then(fn, fn);
+            decodeChain = run.catch(() => {});
+            return run;
+        }
 
         // ---------- gallery-level heuristics ----------
         function detectGalleryAnimated() {
@@ -1398,52 +1710,82 @@
             };
         }
 
-        function renderStatus() {
+        // Download progress fires many times a second per file, and this
+        // walks every state, so coalesce it to one pass per frame.
+        const renderStatus = rafThrottle(renderStatusNow);
+
+        function renderStatusNow() {
             const p = badgeParts();
             if (!p) return;
 
             if (!totalAnimated) { p.badge.style.display = 'none'; return; }
 
-            let done = 0;
+            // "ready" now means the bytes arrived and the frame decoded, so
+            // the headline number matches what can actually animate. The bar
+            // additionally credits partial downloads, so it keeps creeping
+            // forward while a large GIF is still coming in.
+            let ready = 0;
             let errored = 0;
+            let working = 0;
+            let partial = 0;
+            let playing = 0;
+            let oversize = 0;
             for (const st of states.values()) {
                 if (!st.isAnimated) continue;
-                if (st.status === 'ready') done++;
-                else if (st.status === 'error') { done++; errored++; }
+                if (st.status === 'ready') {
+                    ready++;
+                    if (st.playing) playing++;
+                } else if (st.status === 'error') {
+                    errored++;
+                } else if (st.status === 'oversize') {
+                    oversize++;
+                } else if (st.status === 'probing' || st.status === 'loading') {
+                    working++;
+                    partial += st.progress || 0;
+                }
             }
 
-            const pct = Math.round((done / totalAnimated) * 100);
-            const finished = done >= totalAnimated;
-            const busyPages = Array.from(active).map(s => s.index).sort((a, b) => a - b);
+            const settled = ready + errored + oversize;
+            const pct = Math.round(((settled + partial) / totalAnimated) * 100);
+            const finished = settled >= totalAnimated;
 
             p.badge.style.display = 'inline-flex';
             p.badge.classList.toggle('is-done', finished && !pausedReason);
-            p.badge.classList.toggle('is-error', !!pausedReason || (finished && errored > 0));
+            p.badge.classList.toggle('is-paused', !!pausedReason);
+            p.badge.classList.toggle('is-error', !pausedReason && finished && errored > 0);
 
             p.icon.textContent = pausedReason ? '⚠' : finished ? '🎬' : '⏳';
-            p.icon.classList.toggle('eh-anim-spin-icon', !finished && !pausedReason && active.size > 0);
+            p.icon.classList.toggle('eh-anim-spin-icon', !finished && !pausedReason && working > 0);
 
             p.fill.style.width = pct + '%';
-            p.count.textContent = `${done} / ${totalAnimated}`;
+            p.count.textContent = `${ready} / ${totalAnimated}`;
 
             if (pausedReason) {
                 p.pages.textContent = pausedReason;
-            } else if (busyPages.length) {
-                const shown = busyPages.slice(0, 3).join(', ');
-                p.pages.textContent = `p.${shown}` + (queue.length ? ` · +${queue.length}` : '');
+            } else if (working) {
+                p.pages.textContent = `${working}↓` + (queue.length ? ` · +${queue.length}` : '');
             } else if (queue.length) {
                 p.pages.textContent = `+${queue.length} queued`;
             } else if (finished) {
-                p.pages.textContent = errored ? `${errored} failed` : 'ready';
+                p.pages.textContent = errored ? `${errored} failed`
+                                    : oversize ? `${oversize} too big`
+                                    : `${playing} playing`;
             } else {
                 p.pages.textContent = '';
             }
 
             p.badge.title = pausedReason
-                ? pausedReason
-                : `${done} of ${totalAnimated} animated thumbnails loaded` +
-                  (errored ? `, ${errored} failed` : '') +
-                  (queue.length ? `, ${queue.length} waiting` : '');
+                ? pausedReason + ' — click to resume'
+                : [
+                    `${ready} of ${totalAnimated} loaded and ready`,
+                    working ? `${working} downloading` : null,
+                    queue.length ? `${queue.length} waiting` : null,
+                    oversize ? `${oversize} above the size limit (click one to load it)` : null,
+                    errored ? `${errored} failed` : null,
+                    CONFIG.playBudget === 0
+                        ? `${playing} playing (hover-only mode)`
+                        : `${playing} playing now (budget ${CONFIG.playBudget})`
+                  ].filter(Boolean).join(' · ');
         }
 
         // ---------- fetch queue ----------
@@ -1482,71 +1824,236 @@
             }
         }
 
-        function showFetchIndicator(st, on) {
-            const box = st.box;
-            if (!box) return;
-            box.classList.toggle('eh-thumb-fetching', on);
-            if (on) {
-                if (!box.querySelector('.eh-thumb-spinner')) {
-                    const sp = document.createElement('div');
-                    sp.className = 'eh-thumb-spinner';
-                    sp.innerHTML = '<span class="eh-anim-spin-icon">⚙</span>Loading';
-                    box.appendChild(sp);
+        /**
+         * Show one thumbnail's real phase on the thumbnail itself. A still
+         * picture must never be ambiguous: the user has to be able to tell
+         * "still downloading" from "downloaded" from "downloaded but
+         * deliberately paused to save CPU".
+         */
+        /**
+         * One chip carries the whole lifecycle of a thumbnail, so there is
+         * never a second indicator to collide with it or with the download
+         * button. Rendering is wrapped defensively: a single malformed cell
+         * must not be able to throw out of the queue's finally block and
+         * wedge the loader.
+         */
+        function renderThumbState(st) {
+            try {
+                if (!st.box) return;
+                const s = st.status;
+                const busy = s === 'probing' || s === 'loading';
+
+                if (s === 'idle' || s === 'queued') {
+                    if (st.overlay) st.overlay.remove();
+                    st.overlay = null;
+                    st.chip = null;
+                    st.bar = null;
+                    st.box.classList.remove('eh-thumb-fetching');
+                    return;
                 }
-            } else {
-                const sp = box.querySelector('.eh-thumb-spinner');
-                if (sp) sp.remove();
+
+                ensureOverlay(st);
+                st.box.classList.toggle('eh-thumb-fetching', busy);
+
+                const ext = (st.ext || 'anim').toUpperCase().slice(0, 4);
+                const pct = Math.round((st.progress || 0) * 100);
+                let cls = 'eh-chip';
+                let text = '';
+                let title = '';
+
+                if (s === 'probing') {
+                    cls += ' is-finding';
+                    text = '⚙ finding…';
+                    title = 'Looking up the image address';
+                } else if (s === 'loading') {
+                    cls += ' is-loading';
+                    text = st.total ? `↓ ${pct}%` : `↓ ${formatBytes(st.loaded || 0)}`;
+                    title = st.total
+                        ? `Downloading ${ext} — ${formatBytes(st.loaded || 0)} of ${formatBytes(st.total)}`
+                        : `Downloading ${ext}`;
+                } else if (s === 'ready') {
+                    if (st.playing) {
+                        cls += ' is-playing';
+                        text = `▶ ${ext}`;
+                        title = `Loaded and playing · ${formatBytes(st.bytes || 0)}`;
+                    } else {
+                        cls += ' is-paused';
+                        text = `❚❚ ${ext}`;
+                        title = `Loaded (${formatBytes(st.bytes || 0)}) · paused to save CPU — hover to play`;
+                    }
+                } else if (s === 'oversize') {
+                    cls += ' is-oversize';
+                    text = `▶ ${formatBytes(st.bytes || 0)}`;
+                    title = `${formatBytes(st.bytes || 0)} — above the auto-load limit. ` +
+                            'Click to load this one anyway.';
+                } else {
+                    cls += ' is-error';
+                    text = `⚠ ${st.errorText || 'failed'}`;
+                    title = `${st.errorText || 'Failed'} — click to retry`;
+                }
+
+                st.chip.className = cls;
+                st.chip.textContent = text;
+                st.chip.title = title;
+
+                if (s === 'loading') {
+                    if (!st.bar || !st.bar.isConnected) {
+                        st.bar = document.createElement('div');
+                        st.bar.className = 'eh-thumb-bar';
+                        st.bar.dataset.eh = '';
+                        st.bar.innerHTML = '<i></i>';
+                        st.overlay.appendChild(st.bar);
+                    }
+                    st.bar.firstChild.style.width = pct + '%';
+                } else if (st.bar) {
+                    st.bar.remove();
+                    st.bar = null;
+                }
+            } catch (err) {
+                console.warn('[ExHD] thumbnail indicator failed', err);
             }
         }
 
-        function dispatch(st) {
-            st.status = 'fetching';
-            st.urgent = false;   // the queue-jump only applied to the fetch
+        /**
+         * A thumbnail goes through two distinct network phases, and the slot
+         * is held for both. The previous build marked a thumbnail finished
+         * once phase one resolved, so the counter reported files that had
+         * only had their URL discovered -- the bytes were often still in
+         * flight, which is why far fewer thumbnails were animating than the
+         * badge claimed.
+         *
+         *   probing  -- fetch the /s/ page to discover the image URL
+         *   loading  -- pull the actual bytes, with real progress
+         *   ready    -- decoded and mountable
+         */
+        async function dispatch(st) {
+            st.urgent = false;
+            st.startedAt = performance.now();
             active.add(st);
+            st.status = 'probing';
+            st.progress = 0;
+            renderThumbState(st);
             renderStatus();
-            showFetchIndicator(st, true);
 
-            loadViewerInfo(st.pageUrl)
-                .then(info => {
-                    // The resampled view is animated too and costs far less
-                    // bandwidth and quota than pulling the original.
-                    st.src = info.displayUrl || info.originalUrl;
-                    st.status = st.src ? 'ready' : 'error';
-                    if (st.src) mount(st);
-                })
-                .catch(err => {
-                    st.status = 'error';
-                    if (err && err.kind === QUOTA_HALT) {
-                        // Stop burning requests the moment limits are hit,
-                        // but keep the thumbnails that already loaded.
-                        pause('Animation paused — image limit reached');
-                        Quota.refresh({ force: true });
-                    } else if (err && err.kind !== 'abort') {
-                        console.warn('[ExHD] live thumb lookup failed', st.pageUrl, err);
+            try {
+                const info = await loadViewerInfo(st.pageUrl);
+                // The resampled view is animated too and costs far less
+                // bandwidth and quota than pulling the original.
+                st.src = info.displayUrl || info.originalUrl;
+                if (!st.src) throw new EhError('parse', 'no image source');
+
+                st.status = 'loading';
+                renderThumbState(st);
+                renderStatus();
+
+                await downloadImage(st);
+                await mount(st);
+
+                st.status = 'ready';
+            } catch (err) {
+                if (err && err.kind === OVERSIZE) {
+                    // Not a failure: the file is simply too heavy to play
+                    // automatically. Offer it instead of forcing it.
+                    st.status = 'oversize';
+                    st.errorText = null;
+                    return;
+                }
+                st.status = 'error';
+                st.errorText = err && err.kind === 'timeout' ? 'timeout'
+                             : err && err.kind === QUOTA_HALT ? 'limit'
+                             : err && err.kind === 'http' ? 'HTTP ' + err.detail
+                             : 'failed';
+                if (err && err.kind === QUOTA_HALT) {
+                    // Stop burning requests the moment limits are hit,
+                    // but keep the thumbnails that already loaded.
+                    pause('Animation paused — image limit reached');
+                    Quota.refresh({ force: true });
+                } else if (err && err.kind !== 'abort') {
+                    console.warn('[ExHD] live thumb failed', st.pageUrl, err);
+                }
+            } finally {
+                st.request = null;
+                active.delete(st);
+                renderThumbState(st);
+                renderStatus();
+                updateBudget();
+                pump();
+            }
+        }
+
+        /**
+         * Pull the image through GM_xmlhttpRequest instead of assigning
+         * img.src directly. A plain <img> reports no progress at all, and the
+         * hath.network hosts that serve thumbnails send no CORS headers, so
+         * fetch() cannot read them either. Keeping the blob means a thumbnail
+         * evicted to free memory re-mounts without touching the network.
+         */
+        function downloadImage(st) {
+            if (st.objectUrl) return Promise.resolve();
+
+            const cap = sizeCapBytes();
+            let refused = false;
+
+            const req = gmRequest({
+                url: st.src,
+                responseType: 'blob',
+                headers: { Referer: st.pageUrl },
+                timeout: 120000,
+                onprogress: p => {
+                    if (!p.lengthComputable) return;
+                    // Content-Length arrives with the first progress tick, so
+                    // an oversized file costs a few KB rather than freezing the
+                    // tab on a multi-hundred-megabyte animated decode.
+                    if (cap && p.total > cap && !st.forced) {
+                        refused = true;
+                        st.bytes = p.total;
+                        try { req.abort(); } catch { /* already settled */ }
+                        return;
                     }
-                })
-                .finally(() => {
-                    active.delete(st);
-                    showFetchIndicator(st, false);
+                    st.loaded = p.loaded;
+                    st.total = p.total;
+                    st.progress = p.total ? p.loaded / p.total : 0;
+                    renderThumbState(st);
                     renderStatus();
-                    updateBudget();
-                    pump();
-                });
+                }
+            });
+            st.request = req;
+
+            return req.then(res => {
+                if (res.status !== 200) throw new EhError('http', 'HTTP ' + res.status, res.status);
+                const blob = res.response;
+                assertRealImage(blob, res);
+                if (cap && !st.forced && blob.size > cap) {
+                    st.bytes = blob.size;
+                    throw new EhError(OVERSIZE, 'too large');
+                }
+                st.bytes = blob.size;
+                st.loaded = blob.size;
+                st.progress = 1;
+                st.objectUrl = URL.createObjectURL(blob);
+            }, err => {
+                if (refused) throw new EhError(OVERSIZE, 'too large');
+                throw err;
+            });
         }
 
         // ---------- element lifecycle ----------
-        function ensureLayer(st) {
-            if (st.layer) return st.layer;
+        /** The grid markup differs between thumbnail sizes, so guarantee the
+         *  containing block here rather than trusting a selector to have
+         *  matched this particular layout. */
+        function ensureBoxIsContainer(st) {
+            const cs = getComputedStyle(st.box);
+            if (cs.position === 'static') st.box.style.position = 'relative';
+            if (cs.overflow === 'visible') st.box.style.overflow = 'hidden';
+        }
 
-            // The grid markup differs between thumbnail sizes, so guarantee
-            // the containing block here rather than trusting a selector to
-            // have matched this particular layout.
-            const boxStyle = getComputedStyle(st.box);
-            if (boxStyle.position === 'static') st.box.style.position = 'relative';
-            if (boxStyle.overflow === 'visible') st.box.style.overflow = 'hidden';
+        function ensureLayer(st) {
+            if (st.layer && st.layer.isConnected) return st.layer;
+            ensureBoxIsContainer(st);
 
             const layer = document.createElement('div');
             layer.className = 'eh-live-layer';
+            layer.dataset.eh = '';   // keeps the site's and our own box rules off it
 
             const img = document.createElement('img');
             img.decoding = 'async';
@@ -1559,38 +2066,85 @@
             st.layer = layer;
             st.img = img;
             st.canvas = canvas;
-
-            if (!st.box.querySelector('.eh-anim-badge')) {
-                const badge = document.createElement('div');
-                badge.className = 'eh-anim-badge';
-                badge.textContent = (st.ext || 'anim').toUpperCase().slice(0, 4);
-                st.box.appendChild(badge);
-                st.badge = badge;
-            }
             return layer;
         }
 
-        /** Load and decode before showing, so a thumbnail never flashes half-painted. */
+        /**
+         * All indicators live inside one positioned container. Keeping them
+         * as static children of a single slot means the site's own offset
+         * rules cannot displace them, and only this one wrapper is ever the
+         * thumbnail box's last child.
+         */
+        function ensureOverlay(st) {
+            if (st.overlay && st.overlay.isConnected) return st.overlay;
+            ensureBoxIsContainer(st);
+
+            const overlay = document.createElement('div');
+            overlay.className = 'eh-overlay';
+            overlay.dataset.eh = '';
+
+            const slot = document.createElement('div');
+            slot.className = 'eh-overlay-slot';
+            slot.dataset.eh = '';
+
+            const chip = document.createElement('div');
+            chip.className = 'eh-chip';
+            chip.dataset.eh = '';
+            chip.addEventListener('click', e => {
+                if (st.status !== 'error' && st.status !== 'oversize') return;
+                e.preventDefault();
+                e.stopPropagation();
+                // Clicking an oversized thumbnail is explicit consent to pay
+                // the decode cost for that one file.
+                if (st.status === 'oversize') st.forced = true;
+                retry(st);
+            });
+
+            slot.appendChild(chip);
+            overlay.appendChild(slot);
+            st.box.appendChild(overlay);
+
+            st.overlay = overlay;
+            st.chip = chip;
+            st.bar = null;
+            return overlay;
+        }
+
+        /** Put a failed thumbnail back at the head of the queue. */
+        function retry(st) {
+            if (!enabled) return;
+            st.status = 'idle';
+            st.errorText = null;
+            st.progress = 0;
+            st.loaded = 0;
+            st.total = 0;
+            renderThumbState(st);
+            enqueue(st, true);
+        }
+
+        /** Decode before showing, so a thumbnail never flashes half-painted. */
         function mount(st) {
-            if (!enabled || !st.src || st.mounting) return Promise.resolve();
+            if (!enabled || !st.objectUrl || st.mounting) return Promise.resolve();
             ensureLayer(st);
             if (st.mounted) return Promise.resolve();
 
             st.mounting = true;
-            st.img.src = st.src;
+            st.img.src = st.objectUrl;   // already downloaded, so this is local
 
-            const decoded = st.img.decode
+            // Serialised: two big animated decodes at once lock up the tab.
+            const decoded = queueDecode(() => (st.img.decode
                 ? st.img.decode()
-                : new Promise((res, rej) => { st.img.onload = res; st.img.onerror = rej; });
+                : new Promise((res, rej) => { st.img.onload = res; st.img.onerror = rej; })));
 
             return decoded.then(() => {
                 st.mounted = true;
                 st.mounting = false;
                 st.layer.classList.add('is-shown');
+                renderThumbState(st);
                 updateBudget();
-            }).catch(() => {
+            }).catch(err => {
                 st.mounting = false;
-                st.status = 'error';
+                throw err;
             });
         }
 
@@ -1615,11 +2169,11 @@
         }
 
         function play(st) {
-            if (!st.mounted) { mount(st); return; }
+            if (!st.mounted) { mount(st).catch(() => { st.status = 'error'; }); return; }
             if (st.playing) return;
             st.playing = true;
             st.layer.classList.remove('is-frozen');
-            if (st.badge) st.badge.classList.remove('is-frozen');
+            renderThumbState(st);
         }
 
         function freeze(st) {
@@ -1628,7 +2182,7 @@
             if (!st.hasFrame) return;      // nothing to show yet; keep playing
             st.playing = false;
             st.layer.classList.add('is-frozen');
-            if (st.badge) st.badge.classList.add('is-frozen');
+            renderThumbState(st);
         }
 
         /** Release decoded animation frames while keeping the still visible. */
@@ -1677,6 +2231,16 @@
             }
         });
 
+        /** Named so that resume() can re-attach the same observer callback. */
+        function onIntersect(entries) {
+            for (const entry of entries) {
+                const st = states.get(entry.target);
+                if (!st || !st.isAnimated) continue;
+                if (entry.isIntersecting && st.status === 'idle') enqueue(st);
+            }
+            updateBudget();
+        }
+
         const onScroll = () => updateBudget();
 
         function onResize() {
@@ -1718,19 +2282,30 @@
             if (!gdt || enabled) return;
             enabled = true;
 
+            // One unreadable cell must not abort the whole setup pass.
             Array.from(gdt.children).forEach((itemEl, idx) => {
-                const box = resolveThumbBox(itemEl);
-                const pageUrl = resolveLink(itemEl);
-                const { isAnimated, ext } = classify(itemEl);
+                let box, pageUrl, isAnimated = false, ext = '';
+                try {
+                    box = resolveThumbBox(itemEl);
+                    pageUrl = resolveLink(itemEl);
+                    ({ isAnimated, ext } = classify(itemEl));
+                } catch (err) {
+                    console.warn('[ExHD] skipping unreadable grid cell', idx + 1, err);
+                    return;
+                }
 
                 states.set(itemEl, {
                     index: idx + 1, element: itemEl, box, pageUrl,
                     isAnimated: isAnimated && !!pageUrl && !!box, ext,
                     status: 'idle', src: null,
-                    layer: null, img: null, canvas: null, badge: null,
+                    layer: null, img: null, canvas: null,
+                    overlay: null, chip: null, bar: null, startedAt: 0,
                     mounted: false, mounting: false, playing: false,
                     hasFrame: false, pinned: false, urgent: false,
-                    docTop: 0, height: 1, dist: Infinity, inView: false
+                    docTop: 0, height: 1, dist: Infinity, inView: false,
+                    // download bookkeeping
+                    objectUrl: null, request: null, forced: false,
+                    progress: 0, loaded: 0, total: 0, bytes: 0, errorText: null
                 });
             });
 
@@ -1738,19 +2313,13 @@
             for (const st of states.values()) if (st.isAnimated) totalAnimated++;
             pausedReason = null;
 
-            CONFIG.playBudget = clamp(pref('eh_anim_play_budget'), 1, 12);
+            CONFIG.playBudget = clamp(pref('eh_anim_play_budget'), 0, 12);
             CONFIG.maxConcurrentFetch = clamp(pref('eh_anim_concurrency'), 1, 4);
 
             measureLayout();
 
-            io = new IntersectionObserver(entries => {
-                for (const entry of entries) {
-                    const st = states.get(entry.target);
-                    if (!st || !st.isAnimated) continue;
-                    if (entry.isIntersecting && st.status === 'idle') enqueue(st);
-                }
-                updateBudget();
-            }, { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
+            io = new IntersectionObserver(onIntersect,
+                { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
 
             for (const st of states.values()) {
                 if (st.isAnimated) io.observe(st.element);
@@ -1760,6 +2329,10 @@
             window.addEventListener('resize', onResize, { passive: true });
             gdt.addEventListener('pointerover', onPointerOver, { passive: true });
             gdt.addEventListener('pointerout', onPointerOut, { passive: true });
+
+            startWatchdog();
+            clearTimeout(seedTimer);
+            seedTimer = setTimeout(seedIfIdle, CONFIG.seedDelayMs);
 
             updateBudget();
             renderStatus();
@@ -1772,8 +2345,20 @@
             if (io) { io.disconnect(); io = null; }
             clearTimeout(pumpTimer); pumpTimer = null;
             clearTimeout(resizeTimer); resizeTimer = null;
+            clearTimeout(seedTimer); seedTimer = null;
+            clearInterval(watchdogId); watchdogId = null;
             queue.length = 0;
             active.clear();
+
+            // Drop in-flight transfers and release every blob before the
+            // states that own them go away, or the memory leaks for the
+            // lifetime of the tab.
+            for (const st of states.values()) {
+                if (st.request && st.request.abort) { try { st.request.abort(); } catch { /* done */ } }
+                if (st.objectUrl) URL.revokeObjectURL(st.objectUrl);
+                st.objectUrl = null;
+                st.request = null;
+            }
 
             window.removeEventListener('scroll', onScroll);
             window.removeEventListener('resize', onResize);
@@ -1783,7 +2368,8 @@
                 gdt.removeEventListener('pointerout', onPointerOut);
             }
 
-            $$('.eh-live-layer, .eh-anim-badge, .eh-thumb-spinner').forEach(el => el.remove());
+            $$('.eh-live-layer, .eh-overlay, .eh-anim-badge, .eh-thumb-status, .eh-thumb-bar')
+                .forEach(el => el.remove());
             $$('.eh-thumb-fetching').forEach(el => el.classList.remove('eh-thumb-fetching'));
 
             states.clear();
@@ -1800,18 +2386,100 @@
          * whole grid down would throw away work that cost quota to load.
          */
         function pause(reason) {
-            queue.forEach(st => { st.status = 'idle'; });
+            queue.forEach(st => { st.status = 'idle'; renderThumbState(st); });
             queue.length = 0;
             clearTimeout(pumpTimer);
             pumpTimer = null;
             if (io) { io.disconnect(); io = null; }
+
+            // Cancel transfers that are still running; finishing them would
+            // spend quota we already know we do not have.
+            for (const st of active) {
+                if (st.request && st.request.abort) { try { st.request.abort(); } catch { /* done */ } }
+            }
+
             pausedReason = reason;
             renderStatus();
         }
 
+        /**
+         * Pausing used to be terminal: the observer was gone and nothing
+         * could ever restart it short of reloading the page. A halt caused by
+         * a transient limit must be recoverable.
+         */
+        function resume() {
+            if (!enabled || !pausedReason) return;
+            pausedReason = null;
+
+            for (const st of states.values()) {
+                if (st.status === 'error' && st.errorText === 'limit') {
+                    st.status = 'idle';
+                    st.errorText = null;
+                    renderThumbState(st);
+                }
+            }
+
+            if (!io) {
+                io = new IntersectionObserver(onIntersect,
+                    { root: null, rootMargin: CONFIG.rootMargin, threshold: 0 });
+                for (const st of states.values()) if (st.isAnimated) io.observe(st.element);
+            }
+
+            seedIfIdle();
+            renderStatus();
+            pump();
+        }
+
+        /**
+         * A task that never settles holds a concurrency slot for good, and
+         * once both slots are held the pump can no longer dispatch anything:
+         * the whole loader looks frozen even though nothing crashed. Reclaim
+         * slots from stalled tasks so one bad file cannot stop the rest.
+         */
+        function startWatchdog() {
+            clearInterval(watchdogId);
+            watchdogId = setInterval(() => {
+                if (!enabled) return;
+                const now = performance.now();
+                let reclaimed = 0;
+                for (const st of Array.from(active)) {
+                    if (now - (st.startedAt || now) < CONFIG.taskTimeoutMs) continue;
+                    if (st.request && st.request.abort) {
+                        try { st.request.abort(); } catch { /* already finished */ }
+                    }
+                    st.status = 'error';
+                    st.errorText = 'stalled';
+                    active.delete(st);
+                    renderThumbState(st);
+                    reclaimed++;
+                }
+                if (reclaimed) {
+                    console.warn(`[ExHD] reclaimed ${reclaimed} stalled animation slot(s)`);
+                    renderStatus();
+                    pump();
+                }
+            }, 5000);
+        }
+
+        /**
+         * IntersectionObserver occasionally delivers nothing on a freshly
+         * restored page, leaving the queue empty and the grid inert. If no
+         * work has appeared shortly after enabling, seed it by hand.
+         */
+        function seedIfIdle() {
+            if (!enabled || queue.length || active.size) return;
+            const limit = window.scrollY + window.innerHeight + 200;
+            let seeded = 0;
+            for (const st of states.values()) {
+                if (!st.isAnimated || st.status !== 'idle') continue;
+                if (st.docTop < limit) { enqueue(st); seeded++; }
+            }
+            if (seeded) console.info(`[ExHD] observer was quiet; seeded ${seeded} thumbnail(s)`);
+        }
+
         /** Live-apply the budget sliders without reloading the grid. */
         function setConfig({ playBudget, concurrency }) {
-            if (playBudget != null) CONFIG.playBudget = clamp(playBudget, 1, 12);
+            if (playBudget != null) CONFIG.playBudget = clamp(playBudget, 0, 12);
             if (concurrency != null) CONFIG.maxConcurrentFetch = clamp(concurrency, 1, 4);
             if (enabled) { updateBudget(); pump(); }
         }
@@ -1825,8 +2493,9 @@
         }
 
         return {
-            enable, disable, setConfig, countAnimatedCandidates,
-            get isEnabled() { return enabled; }
+            enable, disable, setConfig, resume, countAnimatedCandidates,
+            get isEnabled() { return enabled; },
+            get isPaused() { return !!pausedReason; }
         };
     })();
     // =====================================================================
@@ -2171,8 +2840,15 @@
                             extFromUrl(targetUrl) ||
                             'jpg';
 
-                const pad = padWidthFor(getGalleryPageCount());
-                const filename = `${getGalleryTitle()} - ${String(pageNum).padStart(pad, '0')}.${ext}`;
+                const filename = buildFilename(pref('eh_filename_template'), filenameVars({
+                    title: getGalleryTitle(),
+                    page: pageNum,
+                    total: info.pageCount || getGalleryPageCount(),
+                    gid: galleryId,
+                    res: resLabel,
+                    origName: info.origName,
+                    ext
+                }));
                 saveBlob(blob, filename);
 
                 const sizeText = formatBytes(blob.size);
@@ -2337,7 +3013,10 @@
             panel.innerHTML = `
                 <div class="eh-set-head">
                     <span>⚙ ExH Downloader settings</span>
-                    <button type="button" class="eh-set-close" id="eh-set-close" title="Close">✕</button>
+                    <span style="display:flex;align-items:center;gap:8px;">
+                        <button type="button" class="eh-wn-older" id="eh-set-whatsnew">What's new</button>
+                        <button type="button" class="eh-set-close" id="eh-set-close" title="Close">✕</button>
+                    </span>
                 </div>
                 <div class="eh-set-body">
                     ${onGallery ? `
@@ -2357,16 +3036,43 @@
                         <div class="eh-set-label">Browsing</div>
                         ${checkboxRow('eh-set-newtab', 'Open links in a new tab', pref('eh_open_in_new_tab'))}
                         ${onGallery ? '' : checkboxRow('eh-set-peek', 'Gallery peeker on hover', pref('eh_gallery_peeker'))}
+                        <div class="eh-set-note">Hold <b>Ctrl</b> and hover a thumbnail to preview the full image.</div>
                     </div>
 
                     ${onGallery ? `
                     <div class="eh-set-row">
                         <div class="eh-set-label">Animated thumbnails</div>
-                        ${rangeRow('eh-set-play', 'Playing at once', pref('eh_anim_play_budget'), 1, 12)}
+                        ${rangeRow('eh-set-play', 'Playing at once', pref('eh_anim_play_budget'), 0, 12)}
                         ${rangeRow('eh-set-conc', 'Parallel lookups', pref('eh_anim_concurrency'), 1, 4)}
-                        <div class="eh-set-note">Fewer playing at once means less CPU and GPU load.
-                        Loading these images spends your image limit, so keep parallel lookups low.</div>
+                        ${rangeRow('eh-set-cap', 'Auto-load up to, MB', pref('eh_anim_size_cap_mb'), 0, 64)}
+                        ${rangeRow('eh-set-pcap', 'Ctrl+hover preview up to, MB', pref('eh_preview_size_cap_mb'), 0, 128)}
+                        <div class="eh-set-note">
+                            Playing <b>0</b> means nothing animates on its own — only the thumbnail
+                            under the cursor plays. Heavier files than the size limit show their
+                            weight and load only when clicked; <b>0</b> lifts the limit.
+                            Loading these images spends your image limit.
+                        </div>
                     </div>` : ''}
+
+                    <div class="eh-set-row">
+                        <div class="eh-set-label">Saved file names</div>
+                        <input type="text" id="eh-set-tpl" class="eh-set-text"
+                               value="${String(pref('eh_filename_template')).replace(/"/g, '&quot;')}"
+                               spellcheck="false">
+                        <div class="eh-set-note">
+                            Tokens: <b>{title}</b> <b>{name}</b> <b>{artist}</b> <b>{num}</b> <b>{page}</b>
+                            <b>{total}</b> <b>{gid}</b> <b>{res}</b> <b>{orig}</b> <b>{ext}</b>.
+                            <b>{num}</b> is the zero-padded page number, <b>{orig}</b> the site's own
+                            filename, <b>{name}</b> the title without its leading artist bracket.
+                            A <b>/</b> makes a sub-folder, so <b>{artist}/{name}/{num}.{ext}</b> files
+                            each gallery on its own.
+                        </div>
+                        <div class="eh-set-preview" id="eh-set-tpl-preview"></div>
+                        <button type="button" class="eh-set-danger" id="eh-set-tpl-reset"
+                                style="align-self:flex-start;background:var(--eh-panel);border-color:var(--eh-line);color:var(--eh-text-dim);">
+                            Reset to default
+                        </button>
+                    </div>
 
                     <div class="eh-set-row">
                         <div class="eh-set-label">Download memory</div>
@@ -2385,6 +3091,10 @@
 
         function wire(gid) {
             $('#eh-set-close', panel).addEventListener('click', close);
+            $('#eh-set-whatsnew', panel).addEventListener('click', () => {
+                close();
+                showWhatsNew(true);
+            });
 
             const grid = $('#eh-pos-grid', panel);
             if (grid) {
@@ -2442,6 +3152,45 @@
             };
             bindRange('eh-set-play', 'eh_anim_play_budget', v => LiveThumbs.setConfig({ playBudget: v }));
             bindRange('eh-set-conc', 'eh_anim_concurrency', v => LiveThumbs.setConfig({ concurrency: v }));
+            bindRange('eh-set-cap', 'eh_anim_size_cap_mb', () => { /* applies to the next load */ });
+            bindRange('eh-set-pcap', 'eh_preview_size_cap_mb', () => { /* applies to the next preview */ });
+
+            // Live filename preview, built from the real gallery when there
+            // is one, so the sample is not a fiction.
+            const tpl = $('#eh-set-tpl', panel);
+            if (tpl) {
+                const preview = $('#eh-set-tpl-preview', panel);
+                const sampleVars = () => filenameVars({
+                    title: $('#gdt') ? getGalleryTitle() : '[Artist] Sample Gallery Title',
+                    page: 7,
+                    total: getGalleryPageCount() || 129,
+                    gid: gid || '1234567',
+                    res: '1280x1810',
+                    origName: '007.jpg',
+                    ext: 'png'
+                });
+                const refresh = () => {
+                    const value = tpl.value;
+                    const unknown = (value.match(/\{(\w+)\}/g) || [])
+                        .map(t => t.slice(1, -1).toLowerCase())
+                        .filter(t => !FILENAME_TOKENS.includes(t));
+                    const name = buildFilename(value, sampleVars());
+                    preview.textContent = unknown.length
+                        ? `Unknown token: {${unknown[0]}} — left as text · ${name}`
+                        : name;
+                    preview.classList.toggle('is-bad', unknown.length > 0);
+                };
+                tpl.addEventListener('input', () => {
+                    setSetting('eh_filename_template', tpl.value.trim() || DEFAULTS.eh_filename_template);
+                    refresh();
+                });
+                $('#eh-set-tpl-reset', panel).addEventListener('click', () => {
+                    tpl.value = DEFAULTS.eh_filename_template;
+                    setSetting('eh_filename_template', tpl.value);
+                    refresh();
+                });
+                refresh();
+            }
 
             const forget = $('#eh-set-forget', panel);
             if (forget) {
@@ -2518,19 +3267,15 @@
                         title="Queue every image on this page that is not saved yet">⬇ Download page</button>
                 <button type="button" id="eh-retry-btn" class="eh-top-btn eh-btn-warn" style="display:none;">↻ Retry failed</button>
                 <button type="button" id="eh-cancel-all-btn" class="eh-top-btn eh-btn-danger" style="display:none;">✕ Cancel all</button>
-                <label class="eh-checkbox-label${openNewTab ? ' is-on' : ''}" title="Open thumbnails in a new tab">
-                    <input type="checkbox" id="eh-setting-new-tab" ${openNewTab ? 'checked' : ''}>
-                    <span>New tab</span>
-                </label>
+                <button type="button" id="eh-archive-btn" class="eh-top-btn" style="display:none;"
+                        title="Open the site's own Archive Download dialog for the whole gallery">🗜 Archive</button>
                 <label class="eh-checkbox-label${liveThumbs ? ' is-on' : ''}"
                        title="Play animated GIF/WebP images inside the grid. Loading them counts towards your image limit.">
                     <input type="checkbox" id="eh-setting-live-thumbs" ${liveThumbs ? 'checked' : ''}>
-                    <span>🎬 Animated thumbs${animCount ? ` (${animCount})` : ''}</span>
+                    <span>🎬 Animated${animCount ? ` (${animCount})` : ''}</span>
                 </label>
-                <div id="eh-anim-status" class="eh-badge eh-anim-status-badge" style="display:none;"></div>
-                <div class="eh-badge eh-hint-badge" title="Hold Ctrl and hover a thumbnail for a full preview">
-                    <kbd>Ctrl</kbd> + hover = 🔍
-                </div>
+                <div id="eh-anim-status" class="eh-badge eh-anim-status-badge" style="display:none;"
+                     title="Animated thumbnail progress"></div>
                 <div id="eh-saved-stats" class="eh-badge eh-saved-count-badge" style="display:none;"></div>
                 <div class="eh-badge eh-quota-badge">
                     <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
@@ -2550,11 +3295,19 @@
         $('#eh-cancel-all-btn', bar).addEventListener('click', DownloadQueue.cancelAll);
         $('#eh-retry-btn', bar).addEventListener('click', DownloadQueue.retryAllFailed);
 
-        const newTabCb = $('#eh-setting-new-tab', bar);
-        newTabCb.addEventListener('change', e => {
-            setSetting('eh_open_in_new_tab', e.target.checked);
-            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
-            applyNewTabBehavior(e.target.checked);
+        // The site already offers a whole-gallery archive; surface its own
+        // dialog rather than reimplementing it, and only when it exists.
+        const archiveBtn = $('#eh-archive-btn', bar);
+        const nativeArchive = $$('#gd5 a').find(a =>
+            /archiver/i.test(a.getAttribute('onclick') || '') || /archiver/i.test(a.href || ''));
+        if (nativeArchive) {
+            archiveBtn.style.display = 'inline-flex';
+            archiveBtn.addEventListener('click', () => nativeArchive.click());
+        }
+
+        // A halted loader is recoverable now, so let the badge restart it.
+        $('#eh-anim-status', bar).addEventListener('click', () => {
+            if (LiveThumbs.isPaused) LiveThumbs.resume();
         });
 
         const liveCb = $('#eh-setting-live-thumbs', bar);
@@ -2672,6 +3425,14 @@
         let cursor = { x: 0, y: 0 };
         let openFor = null;
         let loadToken = 0;
+        let activePreviewReq = null;
+        let previewObjectUrl = null;
+
+        function revokePreviewUrl() {
+            if (!previewObjectUrl) return;
+            URL.revokeObjectURL(previewObjectUrl);
+            previewObjectUrl = null;
+        }
 
         function fitStage(resText) {
             const m = String(resText || '').match(/(\d+)x(\d+)/i);
@@ -2690,20 +3451,29 @@
         function close() {
             openFor = null;
             loadToken++;
+            // Stop the transfer as soon as the cursor leaves; otherwise a
+            // heavy file keeps streaming for a preview nobody is looking at.
+            if (activePreviewReq && activePreviewReq.abort) {
+                try { activePreviewReq.abort(); } catch { /* already settled */ }
+            }
+            activePreviewReq = null;
             popup.classList.remove('is-open');
             imgEl.classList.remove('img-ready');
             imgEl.removeAttribute('src');
+            revokePreviewUrl();
             stage.classList.add('is-skeleton');
+            spinEl.textContent = '⟳ loading…';
             spinEl.style.display = 'flex';
         }
 
-        function show(info, pageNum) {
+        function show(info, pageNum, byteSize) {
             spinEl.style.display = 'none';
             stage.classList.remove('is-skeleton');
             imgEl.classList.add('img-ready');
             const bits = [`Page ${pageNum}`];
             if (info.displayRes) bits.push(info.displayRes);
-            if (info.sizeText) bits.push(info.sizeText);
+            const size = byteSize ? formatBytes(byteSize) : info.sizeText;
+            if (size) bits.push(size);
             capEl.innerHTML = bits.map((b, i) => (i ? `<b>${b}</b>` : b)).join(' · ');
         }
 
@@ -2730,10 +3500,46 @@
                 if (!src) { capEl.textContent = `Page ${pageNum} — no source`; return; }
                 fitStage(info.displayRes);
                 reposition();
-                imgEl.src = src;
-                const done = () => { if (token === loadToken) show(info, pageNum); };
-                if (imgEl.decode) imgEl.decode().then(done).catch(done);
-                else imgEl.onload = done;
+
+                // Streaming this instead of assigning img.src is what keeps a
+                // 60 MB animated WebP from locking the tab: the size is known
+                // from the first progress tick, so an oversized file is
+                // refused after a few kilobytes and never decoded.
+                const capMb = clamp(pref('eh_preview_size_cap_mb'), 0, 512);
+                const cap = capMb > 0 ? capMb * 1024 * 1024 : 0;
+                let refused = false;
+
+                const req = fetchImageBlob(src, {
+                    referer: url,
+                    onHandle: r => { activePreviewReq = r; },
+                    onprogress: p => {
+                        if (token !== loadToken || !p.lengthComputable) return;
+                        if (cap && p.total > cap) {
+                            refused = true;
+                            spinEl.textContent = `⚠ ${formatBytes(p.total)} — too large to preview`;
+                            try { activePreviewReq && activePreviewReq.abort(); } catch { /* done */ }
+                            return;
+                        }
+                        spinEl.textContent =
+                            `⟳ ${Math.round((p.loaded / p.total) * 100)}%  ${formatBytes(p.loaded)} / ${formatBytes(p.total)}`;
+                    }
+                });
+
+                req.then(({ blob }) => {
+                    if (token !== loadToken) return;
+                    revokePreviewUrl();
+                    previewObjectUrl = URL.createObjectURL(blob);
+                    imgEl.src = previewObjectUrl;
+                    const done = () => { if (token === loadToken) show(info, pageNum, blob.size); };
+                    if (imgEl.decode) imgEl.decode().then(done).catch(done);
+                    else imgEl.onload = done;
+                }).catch(err => {
+                    if (token !== loadToken || refused) return;
+                    if (err && err.kind === 'abort') return;
+                    spinEl.textContent = err && err.kind === QUOTA_HALT
+                        ? '⚠ image limit reached'
+                        : '⚠ could not load';
+                });
             }).catch(err => {
                 if (token !== loadToken) return;
                 spinEl.textContent = err && err.kind === QUOTA_HALT ? '⚠ image limit reached' : '⚠ could not load';
@@ -2815,12 +3621,7 @@
         Quota.start(() => downloading);
 
         function readPageState() {
-            const text = ($('#i2') || {}).textContent || '';
-            const m = text.match(/(\d+)\s*\/\s*(\d+)/);
-            return {
-                page: m ? parseInt(m[1], 10) : 1,
-                total: m ? parseInt(m[2], 10) : 1
-            };
+            return readPageNav() || { page: 1, total: 1 };
         }
 
         const syncUI = rafThrottle(() => {
@@ -2935,8 +3736,15 @@
                             extFromUrl(targetUrl) ||
                             'jpg';
 
-                const pad = padWidthFor(getGalleryPageCount());
-                saveBlob(blob, `${getGalleryTitle()} - ${String(page).padStart(pad, '0')}.${ext}`);
+                saveBlob(blob, buildFilename(pref('eh_filename_template'), filenameVars({
+                    title: getGalleryTitle(),
+                    page,
+                    total: readPageState().total || getGalleryPageCount(),
+                    gid,
+                    res: resLabel,
+                    origName: info.origName,
+                    ext
+                })));
 
                 const sizeText = formatBytes(blob.size);
                 History.mark(gid, page, { res: resLabel, size: sizeText });
@@ -3239,13 +4047,9 @@
         bar.id = 'eh-top-control-bar';
         bar.innerHTML = `
             <div class="eh-top-left">
-                <label class="eh-checkbox-label${openNewTab ? ' is-on' : ''}" title="Open galleries in a new tab">
-                    <input type="checkbox" id="eh-setting-new-tab" ${openNewTab ? 'checked' : ''}>
-                    <span>New tab</span>
-                </label>
                 <label class="eh-checkbox-label${peeker ? ' is-on' : ''}" title="Show a floating gallery preview on hover">
                     <input type="checkbox" id="eh-setting-peeker" ${peeker ? 'checked' : ''}>
-                    <span>📑 Gallery peeker</span>
+                    <span>📑 Peeker</span>
                 </label>
                 <div class="eh-badge eh-quota-badge">
                     <span id="eh-quota-value">Image Limits: <i>checking…</i></span>
@@ -3261,13 +4065,6 @@
         const gear = $('#eh-settings-btn', bar);
         gear.addEventListener('click', () => SettingsPanel.toggle(gear));
 
-        const newTabCb = $('#eh-setting-new-tab', bar);
-        newTabCb.addEventListener('change', e => {
-            setSetting('eh_open_in_new_tab', e.target.checked);
-            e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
-            applyNewTabBehavior(e.target.checked);
-        });
-
         const peekCb = $('#eh-setting-peeker', bar);
         peekCb.addEventListener('change', e => {
             peekerEnabled = e.target.checked;
@@ -3277,6 +4074,136 @@
 
         applyNewTabBehavior(openNewTab);
         Quota.start(() => false);
+    }
+
+    // =====================================================================
+    // === WHAT'S NEW NOTICE ===============================================
+    // Shown once per version, top-centre, dismissible. The full history is
+    // kept here so the notice can also answer "what changed before this?".
+    // =====================================================================
+    const CHANGELOG = [
+        { v: '15.5.0', groups: [
+            { t: 'Fixed', items: [
+                'Page counter and file numbering on galleries whose files are named 001.jpg. The counter div and the filename div sit side by side in the page markup, and reading them together turned "6 / 129" into "6 / 129006" — which also padded saved filenames to four digits instead of three.'
+            ] },
+            { t: 'Added', items: [
+                'Custom filename template with live preview, in Settings.',
+                'Archive Download shortcut in the gallery bar.',
+                'This what\'s-new notice.'
+            ] }
+        ] },
+        { v: '15.4.0', groups: [
+            { t: 'Fixed', items: [
+                'False "image limit reached" that stopped the loader for good. The detector matched the digits 509 anywhere in an image URL, and H@H addresses contain long digit runs, so ordinary pages were condemned at random. It now matches only the real 509.gif notice.',
+                'An empty or malformed reply is treated as a transient error and retried, instead of halting everything.',
+                'A halted loader can be restarted by clicking its badge; before, only a page reload helped.'
+            ] },
+            { t: 'Added', items: [
+                'Size limit for animated thumbnails. Files heavier than the limit show their weight and load only on click, so a gallery of 60 MB animations no longer freezes the tab.',
+                'Ctrl+hover preview streams with a progress readout, aborts when the cursor leaves, and refuses files above its own limit.',
+                '"Playing at once" can now be set to 0 — nothing animates until hovered.',
+                'Large decodes run one at a time.'
+            ] }
+        ] },
+        { v: '15.3.0', groups: [
+            { t: 'Fixed', items: [
+                'Format badge stretching across the top of thumbnails. Giving the badge a tooltip added a title attribute, which made it match the script\'s own containing-block rule and be forced back into the layout flow.',
+                'Stalled downloads no longer hold a slot forever; a watchdog reclaims them.',
+                'The grid seeds itself if the intersection observer stays quiet, so animated thumbnails always start.'
+            ] },
+            { t: 'Changed', items: [
+                'One status chip per thumbnail covering the whole lifecycle: finding, downloading with progress, playing, paused, failed. Failed chips retry on click.',
+                'Indicators move to the corner opposite the download button.',
+                'Top bar trimmed; secondary options moved into Settings.'
+            ] }
+        ] },
+        { v: '15.2.0', groups: [
+            { t: 'Fixed', items: [
+                'The animation counter reported files whose address had merely been resolved, while the bytes were still in flight — which is why far fewer thumbnails animated than the badge claimed. It now counts only decoded, ready files.'
+            ] },
+            { t: 'Added', items: [
+                'Per-file download progress on each thumbnail, with a progress bar.',
+                'Thumbnails are fetched through the userscript transport, so an evicted one re-mounts without touching the network.'
+            ] }
+        ] },
+        { v: '15.1.0', groups: [
+            { t: 'Fixed', items: [
+                'Hover previews stayed frozen where they appeared: the entrance animation wrote to the same transform used to follow the cursor, and a CSS animation outranks inline styles.',
+                'The download button sat across the "Page N" caption because it was anchored to the grid cell rather than to the picture.'
+            ] },
+            { t: 'Added', items: [
+                'Settings panel behind the gear icon.',
+                'Five download-button positions, plus a reveal-on-hover mode.',
+                'Animated-thumbnail progress badge.'
+            ] }
+        ] },
+        { v: '15.0.0', groups: [
+            { t: 'Fixed', items: [
+                'Original downloads were always saved as .jpg, because /fullimg/ URLs carry no extension. The real format is now read from the file\'s magic bytes.',
+                'Limit notices could be saved as if they were images.',
+                'Scroll stutter in the grid: positions were re-measured inside a sort comparator and on every scroll event.',
+                'Frozen animations flickered between the sprite and the live image, and were never really paused.'
+            ] },
+            { t: 'Added', items: [
+                'Retries with backoff, a failure list, and per-item retry.',
+                'Draggable, collapsible download manager with speed and ETA.',
+                'Theme detection so the interface matches the site\'s colour scheme.',
+                'Automatic updates from the project repository.'
+            ] }
+        ] }
+    ];
+
+    function buildChangelogHtml(entry) {
+        return entry.groups.map(g =>
+            `<h4>${g.t}</h4><ul>${g.items.map(i => `<li>${i}</li>`).join('')}</ul>`
+        ).join('');
+    }
+
+    function showWhatsNew(force) {
+        if ($('#eh-whatsnew')) return;
+        const seen = String(getSetting('eh_seen_version', ''));
+        if (!force && seen === VERSION) return;
+
+        const current = CHANGELOG.find(c => c.v === VERSION) || CHANGELOG[0];
+        const older = CHANGELOG.filter(c => c !== current);
+
+        const box = document.createElement('div');
+        box.id = 'eh-whatsnew';
+        box.innerHTML = `
+            <div class="eh-wn-head">
+                <span>ExH Downloader — what's new <span class="eh-wn-ver">v${current.v}</span></span>
+                <button type="button" class="eh-set-close" id="eh-wn-close" title="Dismiss">✕</button>
+            </div>
+            <div class="eh-wn-body" id="eh-wn-body">${buildChangelogHtml(current)}</div>
+            <div class="eh-wn-foot">
+                <button type="button" class="eh-wn-older" id="eh-wn-older">Show earlier versions</button>
+                <button type="button" class="eh-top-btn eh-btn-go" id="eh-wn-ok">Got it</button>
+            </div>`;
+        document.body.appendChild(box);
+
+        const dismiss = () => {
+            setSetting('eh_seen_version', VERSION);
+            box.remove();
+        };
+        $('#eh-wn-close', box).addEventListener('click', dismiss);
+        $('#eh-wn-ok', box).addEventListener('click', dismiss);
+
+        const olderBtn = $('#eh-wn-older', box);
+        let expanded = false;
+        olderBtn.addEventListener('click', () => {
+            expanded = !expanded;
+            $('#eh-wn-body', box).innerHTML = expanded
+                ? buildChangelogHtml(current) +
+                  older.map(e => `<h4>v${e.v}</h4>${buildChangelogHtml(e)}`).join('')
+                : buildChangelogHtml(current);
+            olderBtn.textContent = expanded ? 'Hide earlier versions' : 'Show earlier versions';
+        });
+
+        document.addEventListener('keydown', function esc(e) {
+            if (e.key !== 'Escape') return;
+            document.removeEventListener('keydown', esc);
+            dismiss();
+        });
     }
 
     // =====================================================================
@@ -3298,6 +4225,10 @@
             }
         } catch (err) {
             console.error('[ExHD] initialisation failed', err);
+        }
+        // Never on the single-image viewer: it would cover the picture.
+        if (!path.startsWith('/s/')) {
+            try { showWhatsNew(false); } catch (err) { console.warn('[ExHD] notice failed', err); }
         }
     }
 
