@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.5.0
+// @version      15.6.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -25,7 +25,7 @@
 (function () {
     'use strict';
 
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.5.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.6.0';
     const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
 
     // =====================================================================
@@ -52,7 +52,91 @@
         return 'dark';
     }
 
-    document.documentElement.setAttribute('data-eh-theme', detectSiteTheme());
+    // ---- colour helpers for palette sampling ----------------------------
+    function parseRgb(css) {
+        const m = String(css || '').match(/rgba?\(([^)]+)\)/);
+        if (!m) return null;
+        const p = m[1].split(',').map(n => parseFloat(n));
+        if (p.length < 3 || p.slice(0, 3).some(isNaN)) return null;
+        if (p.length > 3 && p[3] === 0) return null;      // transparent tells us nothing
+        return { r: p[0], g: p[1], b: p[2] };
+    }
+
+    const rgbCss = c => `rgb(${Math.round(c.r)}, ${Math.round(c.g)}, ${Math.round(c.b)})`;
+
+    function mixRgb(a, b, t) {
+        return { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t };
+    }
+
+    /** Push a colour away from, or towards, white depending on the theme. */
+    function shade(c, amount) {
+        const target = amount > 0 ? { r: 255, g: 255, b: 255 } : { r: 0, g: 0, b: 0 };
+        return mixRgb(c, target, Math.abs(amount));
+    }
+
+    function firstSampled(selectors, prop) {
+        for (const sel of selectors) {
+            const el = document.querySelector(sel);
+            if (!el) continue;
+            const c = parseRgb(getComputedStyle(el)[prop]);
+            if (c) return c;
+        }
+        return null;
+    }
+
+    /**
+     * The site ships several skins, and they differ by far more than
+     * light-versus-dark: e-hentai's default is cream with dark red rules,
+     * while exhentai is charcoal. Guessing a palette produced a panel that
+     * looked obviously foreign, so read the real colours off the page and
+     * derive the rest from them.
+     */
+    function applySampledPalette(theme) {
+        const root = document.documentElement;
+        const body = document.body;
+        if (!body) return;
+
+        const pageBg = parseRgb(getComputedStyle(body).backgroundColor);
+        const pageFg = parseRgb(getComputedStyle(body).color);
+        if (!pageBg || !pageFg) return;         // keep the stylesheet defaults
+
+        // Panels the site itself draws, in rough order of how representative
+        // they are of "a box of content".
+        const panelBg = firstSampled(
+            ['.stuffbox', '#gd4', '.itg', '#toppane', '.gtb', '#gdt', 'table.ptt'],
+            'backgroundColor') || shade(pageBg, theme === 'dark' ? 0.06 : 0.35);
+
+        const line = firstSampled(
+            ['.stuffbox', '.itg td', '.itg', '#gd4', 'table.ptt td', '#nb'],
+            'borderTopColor') || mixRgb(pageBg, pageFg, 0.35);
+
+        const accent = firstSampled(['#nb a', '.ptds a', 'h1 a', '#gn', 'a'], 'color') || pageFg;
+
+        const dark = theme === 'dark';
+        const set = (k, v) => root.style.setProperty(k, v);
+
+        set('--eh-panel', rgbCss(panelBg));
+        set('--eh-panel-raised', rgbCss(shade(panelBg, dark ? 0.07 : 0.30)));
+        set('--eh-panel-sunken', rgbCss(shade(panelBg, dark ? -0.30 : -0.10)));
+        set('--eh-line', rgbCss(line));
+        set('--eh-line-lit', rgbCss(mixRgb(line, pageFg, 0.35)));
+        set('--eh-text', rgbCss(pageFg));
+        set('--eh-text-dim', rgbCss(mixRgb(pageFg, panelBg, 0.42)));
+        set('--eh-text-strong', rgbCss(shade(pageFg, dark ? 0.35 : -0.35)));
+        set('--eh-hover', rgbCss(mixRgb(panelBg, pageFg, dark ? 0.18 : 0.12)));
+        set('--eh-accent', rgbCss(accent));
+        set('--eh-shadow', dark ? 'rgba(0, 0, 0, 0.65)' : 'rgba(0, 0, 0, 0.22)');
+
+        // On a light skin the emerald used for "saved" is too loud against
+        // cream; darken it so it reads as a tint of the page, not a sticker.
+        if (!dark) {
+            set('--eh-ok-deep', 'rgb(223, 236, 224)');
+            set('--eh-ok-dim', 'rgb(31, 110, 61)');
+        }
+    }
+
+    const SITE_THEME = detectSiteTheme();
+    document.documentElement.setAttribute('data-eh-theme', SITE_THEME);
 
     const CSS = `
         :root[data-eh-theme="dark"] {
@@ -129,9 +213,10 @@
             top: 8px;
             z-index: 1000;
         }
+        /* No hardcoded tint here: the panel colour is sampled from the live
+           page, and a fixed rgba() would paint over it with the wrong skin. */
         @supports (backdrop-filter: blur(8px)) {
-            #eh-top-control-bar { background: rgba(52, 53, 59, 0.96); backdrop-filter: blur(8px); }
-            :root[data-eh-theme="light"] #eh-top-control-bar { background: rgba(248, 248, 248, 0.96); }
+            #eh-top-control-bar { backdrop-filter: blur(8px); }
         }
         .eh-top-left  { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
         .eh-top-right { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--eh-text-dim); white-space: nowrap; }
@@ -621,16 +706,30 @@
         .eh-mgr-alert.is-shown { display: block; }
 
         /* ---------- Viewer bar ---------- */
+        /* Floating: the reader scrolls the picture constantly, and a bar that
+           scrolled away meant hunting for it before every page turn. */
         #eh-viewer-control-bar {
+            position: fixed; top: 8px; left: 50%; transform: translateX(-50%);
+            z-index: 1000;
             display: flex; justify-content: space-between; align-items: center;
             flex-wrap: wrap; gap: 8px;
             background: var(--eh-panel-raised);
             border: 1px solid var(--eh-line); border-radius: var(--eh-radius);
-            box-shadow: 0 3px 12px var(--eh-shadow), inset 0 1px 0 rgba(255,255,255,.05);
-            padding: 7px 12px; margin: 8px auto; max-width: 1212px;
-            width: calc(100% - 20px); box-sizing: border-box;
+            box-shadow: 0 4px 18px var(--eh-shadow), inset 0 1px 0 rgba(255,255,255,.05);
+            padding: 7px 12px;
+            max-width: min(1212px, calc(100vw - 24px));
+            box-sizing: border-box;
             font-family: var(--eh-font); font-size: 12px; color: var(--eh-text);
+            opacity: .97;
+            transition: opacity .15s;
         }
+        #eh-viewer-control-bar:hover { opacity: 1; }
+        @supports (backdrop-filter: blur(8px)) {
+            #eh-viewer-control-bar { backdrop-filter: blur(8px); }
+        }
+        /* Keep the first screenful clear of the floating bar. */
+        body.eh-viewer-floating #i1 { padding-top: 58px; }
+        #eh-viewer-control-bar .eh-viewer-nav-btn.disabled { opacity: .3; }
         .eh-viewer-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
         .eh-viewer-sep { width: 1px; height: 18px; background: var(--eh-line); flex-shrink: 0; }
         .eh-viewer-nav-btn {
@@ -754,6 +853,32 @@
             background-size: 200% 100%; animation: ehShimmer 1.4s infinite linear;
         }
         .eh-peek-empty { grid-column: 1 / -1; text-align: center; color: var(--eh-text-dim); padding: 24px 0; }
+
+        /* ---------- Favourite markers in listings ---------- */
+        .eh-fav-mark {
+            position: absolute; top: 3px; left: 3px; z-index: 15;
+            display: inline-flex; align-items: center; gap: 3px;
+            max-width: calc(100% - 6px); box-sizing: border-box;
+            padding: 2px 5px; border-radius: 2px;
+            background: var(--eh-ok-deep); border: 1px solid #27ae60;
+            color: var(--eh-ok-dim);
+            font-family: var(--eh-font); font-size: 9px; font-weight: bold;
+            line-height: 1; letter-spacing: .3px; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis;
+            pointer-events: none; user-select: none;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, .5);
+        }
+        .eh-fav-row-mark {
+            display: inline-flex; align-items: center; gap: 3px;
+            margin-right: 5px; padding: 1px 5px; border-radius: 2px;
+            background: var(--eh-ok-deep); border: 1px solid #27ae60;
+            color: var(--eh-ok-dim); font-size: 10px; font-weight: bold;
+            vertical-align: middle; white-space: nowrap;
+        }
+        .eh-fav-progress {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 11px; color: var(--eh-text-dim);
+        }
 
         /* ---------- What's-new notice ---------- */
         #eh-whatsnew {
@@ -2981,6 +3106,201 @@
     }
 
     // =====================================================================
+    // === FAVOURITES INDEX ================================================
+    // The site can only tell you a gallery is favourited once you open it.
+    // Crawling favourites.php once into a local index lets every listing
+    // show it up front, and makes the whole collection searchable offline.
+    // =====================================================================
+    const GALLERY_RE = /\/g\/(\d+)\/([0-9a-fA-F]+)/;
+
+    const Favorites = (() => {
+        const KEY = 'eh_fav_index_v1';
+        const MAX_PAGES = 80;          // ~4000 galleries; a hard stop, not a target
+        const PACE_MS = 700;
+
+        let cache = null;
+        let crawling = false;
+
+        function load() {
+            if (cache) return cache;
+            try {
+                cache = JSON.parse(rawGet(KEY, 'null')) || null;
+            } catch { cache = null; }
+            if (!cache || typeof cache !== 'object') cache = { updated: 0, names: {}, items: {} };
+            if (!cache.items) cache.items = {};
+            if (!cache.names) cache.names = {};
+            return cache;
+        }
+
+        function save() {
+            try { rawSet(KEY, JSON.stringify(load())); }
+            catch (err) { console.warn('[ExHD] could not persist favourites index', err); }
+        }
+
+        const has = gid => !!load().items[String(gid)];
+        const get = gid => load().items[String(gid)] || null;
+        const size = () => Object.keys(load().items).length;
+        const updatedAt = () => load().updated || 0;
+        const isStale = () => !updatedAt() || Date.now() - updatedAt() > 7 * 24 * 3600 * 1000;
+
+        function categoryName(index) {
+            const n = load().names[String(index)];
+            return n || `Favorites ${index}`;
+        }
+
+        function allCategoryNames() {
+            const out = [];
+            for (let i = 0; i < 10; i++) out.push(categoryName(i));
+            return out;
+        }
+
+        /** Category names live on the sidebar of favourites.php. */
+        function readCategoryNames(doc) {
+            const names = {};
+            [...doc.querySelectorAll('.fp')].forEach((el, i) => {
+                if (i > 9) return;                       // the 11th is "Show All"
+                const label = (el.children[2] || el.children[1] || {}).textContent;
+                if (label) names[String(i)] = label.trim();
+            });
+            return names;
+        }
+
+        function readRows(doc) {
+            const out = [];
+            const itg = doc.querySelector('.itg');
+            if (!itg) return out;
+
+            for (const row of itg.children) {
+                if (!row.querySelector) continue;
+                const link = row.querySelector('a[href*="/g/"]');
+                if (!link) continue;
+                const m = (link.getAttribute('href') || '').match(GALLERY_RE);
+                if (!m) continue;
+
+                // The category is exposed as a title attribute inside the row.
+                const catEl = [...row.querySelectorAll('[title]')]
+                    .find(e => /^Favorites\s+\d/i.test(e.getAttribute('title') || ''));
+                const catNum = catEl
+                    ? parseInt((catEl.getAttribute('title').match(/(\d+)/) || [])[1], 10)
+                    : null;
+
+                const titleEl = row.querySelector('.glname, .gl4t, .gl3t a');
+                const note = row.querySelector('.glfnote');
+
+                out.push({
+                    gid: m[1],
+                    token: m[2],
+                    cat: isNaN(catNum) ? null : catNum,
+                    title: (titleEl ? titleEl.textContent : link.textContent || '').trim().slice(0, 160),
+                    note: note && note.textContent.trim() ? note.textContent.trim().slice(0, 120) : ''
+                });
+            }
+            return out;
+        }
+
+        function nextPageUrl(doc, currentUrl) {
+            const byCursor = [...doc.querySelectorAll('a[href*="next="]')]
+                .map(a => a.href)
+                .find(h => h && h !== currentUrl);
+            if (byCursor) return byCursor;
+            const pager = [...doc.querySelectorAll('.ptt a, .ptb a')]
+                .find(a => /next\s*>/i.test(a.textContent));
+            return pager && pager.href !== currentUrl ? pager.href : null;
+        }
+
+        /**
+         * Walk favourites.php page by page. Paced deliberately: this is the
+         * user's own account and there is no reason to hammer it.
+         */
+        async function rebuild(onProgress) {
+            if (crawling) return { ok: false, reason: 'already running' };
+            crawling = true;
+
+            const items = {};
+            let names = {};
+            let url = location.origin + '/favorites.php';
+            let pages = 0;
+
+            try {
+                while (url && pages < MAX_PAGES) {
+                    const doc = await fetchDocument(url);
+                    if (!pages) names = readCategoryNames(doc);
+
+                    const rows = readRows(doc);
+                    if (!rows.length) break;
+                    for (const r of rows) {
+                        items[r.gid] = { t: r.token, c: r.cat, n: r.title, o: r.note };
+                    }
+
+                    pages++;
+                    if (onProgress) onProgress({ pages, count: Object.keys(items).length });
+
+                    const next = nextPageUrl(doc, url);
+                    if (!next) break;
+                    url = next;
+                    await sleep(PACE_MS);
+                }
+
+                cache = { updated: Date.now(), names, items };
+                save();
+                return { ok: true, pages, count: Object.keys(items).length };
+            } catch (err) {
+                console.warn('[ExHD] favourites crawl failed', err);
+                return { ok: false, reason: err && err.kind === QUOTA_HALT ? 'limit reached' : 'network error' };
+            } finally {
+                crawling = false;
+            }
+        }
+
+        function clear() {
+            cache = { updated: 0, names: {}, items: {} };
+            save();
+        }
+
+        /** Tag every gallery link on the current page that we already own. */
+        function markListings(root) {
+            if (!size()) return 0;
+            const scope = root || document;
+            let marked = 0;
+
+            for (const link of $$('a[href*="/g/"]', scope)) {
+                const m = (link.getAttribute('href') || '').match(GALLERY_RE);
+                if (!m) continue;
+                const entry = get(m[1]);
+                if (!entry) continue;
+
+                // One marker per row, on the outermost cell we can find.
+                const host = link.closest('.gl1t, .gl1e, .gl1c, .itg > tr, .itg > div') || link;
+                if (host.dataset.ehFav) continue;
+                host.dataset.ehFav = '1';
+                marked++;
+
+                const label = entry.c === null || entry.c === undefined
+                    ? '★' : `★ ${categoryName(entry.c)}`;
+
+                const thumb = host.querySelector('.gl3t, .gl2e, .gl1e') || host;
+                const cs = getComputedStyle(thumb);
+                if (cs.position === 'static') thumb.style.position = 'relative';
+
+                const mark = document.createElement('div');
+                mark.className = 'eh-fav-mark';
+                mark.dataset.eh = '';
+                mark.textContent = label;
+                mark.title = entry.o ? `In favourites — ${label}\nNote: ${entry.o}` : `In favourites — ${label}`;
+                thumb.appendChild(mark);
+            }
+            return marked;
+        }
+
+        return {
+            has, get, size, updatedAt, isStale, rebuild, clear,
+            markListings, categoryName, allCategoryNames,
+            get isCrawling() { return crawling; },
+            get items() { return load().items; }
+        };
+    })();
+
+    // =====================================================================
     // === SETTINGS PANEL ==================================================
     // =====================================================================
     const SettingsPanel = (() => {
@@ -3053,6 +3373,24 @@
                             Loading these images spends your image limit.
                         </div>
                     </div>` : ''}
+
+                    <div class="eh-set-row">
+                        <div class="eh-set-label">Favourites</div>
+                        <div class="eh-set-note" id="eh-set-fav-note"></div>
+                        <div style="display:flex;gap:6px;">
+                            <button type="button" class="eh-top-btn" id="eh-set-fav-scan" style="flex:1;">
+                                ⟳ Rebuild index
+                            </button>
+                            <button type="button" class="eh-set-danger" id="eh-set-fav-clear" style="flex:0 0 auto;">
+                                Clear
+                            </button>
+                        </div>
+                        <div class="eh-set-note">
+                            Reads your own favourites once and remembers them, so every listing can
+                            show what you already have. Nothing is sent anywhere and no images are
+                            fetched, so it costs no image quota.
+                        </div>
+                    </div>
 
                     <div class="eh-set-row">
                         <div class="eh-set-label">Saved file names</div>
@@ -3154,6 +3492,41 @@
             bindRange('eh-set-conc', 'eh_anim_concurrency', v => LiveThumbs.setConfig({ concurrency: v }));
             bindRange('eh-set-cap', 'eh_anim_size_cap_mb', () => { /* applies to the next load */ });
             bindRange('eh-set-pcap', 'eh_preview_size_cap_mb', () => { /* applies to the next preview */ });
+
+            // ---- favourites index ----
+            const favNote = $('#eh-set-fav-note', panel);
+            const favScan = $('#eh-set-fav-scan', panel);
+            const refreshFavNote = () => {
+                const n = Favorites.size();
+                if (!n) { favNote.textContent = 'No index yet — nothing is marked in listings.'; return; }
+                const when = new Date(Favorites.updatedAt()).toLocaleString();
+                favNote.textContent = `${n} galleries indexed · last read ${when}` +
+                    (Favorites.isStale() ? ' · getting old, consider rebuilding' : '');
+            };
+            refreshFavNote();
+
+            favScan.addEventListener('click', async () => {
+                if (Favorites.isCrawling) return;
+                favScan.disabled = true;
+                const done = await Favorites.rebuild(p => {
+                    favNote.textContent = `Reading page ${p.pages}… ${p.count} galleries so far`;
+                });
+                favScan.disabled = false;
+                if (done.ok) {
+                    refreshFavNote();
+                    Favorites.markListings();
+                } else {
+                    favNote.textContent = `Could not finish: ${done.reason}`;
+                }
+            });
+
+            $('#eh-set-fav-clear', panel).addEventListener('click', () => {
+                if (!confirm('Forget the local favourites index? Your account is not touched.')) return;
+                Favorites.clear();
+                $$('.eh-fav-mark').forEach(el => el.remove());
+                $$('[data-eh-fav]').forEach(el => delete el.dataset.ehFav);
+                refreshFavNote();
+            });
 
             // Live filename preview, built from the real gallery when there
             // is one, so the sample is not a fiction.
@@ -3597,6 +3970,8 @@
         bar.id = 'eh-viewer-control-bar';
         bar.innerHTML = `
             <div class="eh-viewer-left">
+                <a id="eh-vback" class="eh-viewer-nav-btn" href="#" title="Back to the gallery (Backspace)">↩ Gallery</a>
+                <div class="eh-viewer-sep"></div>
                 <a id="eh-vp" class="eh-viewer-nav-btn" href="#" title="Previous page (← or A)">◀ Prev</a>
                 <a id="eh-vn" class="eh-viewer-nav-btn" href="#" title="Next page (→ or D)">Next ▶</a>
                 <div class="eh-viewer-sep"></div>
@@ -3611,7 +3986,9 @@
                 <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer">v${VERSION}</a>
             </div>`;
         i1.parentNode.insertBefore(bar, i1);
+        document.body.classList.add('eh-viewer-floating');
 
+        const backBtn = $('#eh-vback', bar);
         const prevBtn = $('#eh-vp', bar);
         const nextBtn = $('#eh-vn', bar);
         const dlBtn = $('#eh-vdl', bar);
@@ -3653,18 +4030,75 @@
             cancelBtn.style.display = 'none';
         });
 
+        /**
+         * The site turns pages in place via load_image(), so click its own
+         * anchor rather than reloading the URL — that keeps the fast path.
+         *
+         * The guard fails open on purpose. It used to read the counter and
+         * bail whenever it could not parse one, which silently swallowed
+         * clicks during the in-place swap; that is what made a page turn feel
+         * like it needed two or three presses.
+         */
         function navigate(dir) {
-            const { page, total } = readPageState();
-            if (dir < 0 && page <= 1) return;
-            if (dir > 0 && page >= total) return;
-            const a = dir < 0 ? $('a#prev') : $('a#next');
-            const btn = dir < 0 ? prevBtn : nextBtn;
-            if (a) a.click();
-            else if (btn.href && btn.href !== '#') location.assign(btn.href);
+            const nav = readPageNav();
+            if (nav) {
+                if (dir < 0 && nav.page <= 1) return;
+                if (dir > 0 && nav.page >= nav.total) return;
+            }
+
+            const anchor = dir < 0 ? $('a#prev') : $('a#next');
+            const fallback = dir < 0 ? prevBtn : nextBtn;
+
+            if (anchor) {
+                anchor.click();
+                // If the site's handler did not take over within a frame or
+                // two, fall back to a real navigation instead of doing nothing.
+                const before = location.href;
+                const href = anchor.href;
+                if (href && href !== before) {
+                    setTimeout(() => {
+                        if (location.href === before && readPageNav() &&
+                            readPageNav().page === (nav ? nav.page : -1)) {
+                            location.assign(href);
+                        }
+                    }, 220);
+                }
+                return;
+            }
+            if (fallback.href && fallback.href !== '#') location.assign(fallback.href);
         }
 
-        prevBtn.addEventListener('click', e => { e.preventDefault(); navigate(-1); });
-        nextBtn.addEventListener('click', e => { e.preventDefault(); navigate(1); });
+        // pointerdown fires before the browser settles a click, so the bar
+        // reacts the instant the button is pressed.
+        const bindNav = (btn, dir) => {
+            let armed = false;
+            btn.addEventListener('pointerdown', e => {
+                if (e.button !== 0) return;
+                armed = true;
+            });
+            btn.addEventListener('click', e => {
+                e.preventDefault();
+                if (!armed) { navigate(dir); return; }
+                armed = false;
+                navigate(dir);
+            });
+        };
+        bindNav(prevBtn, -1);
+        bindNav(nextBtn, 1);
+
+        // Back to the gallery this page belongs to.
+        const galleryHref = (() => {
+            const direct = $$('a[href*="/g/"]')
+                .map(a => a.href)
+                .find(h => /\/g\/\d+\/[0-9a-fA-F]+\//.test(h));
+            return direct || null;
+        })();
+        if (galleryHref) {
+            backBtn.href = galleryHref;
+        } else {
+            backBtn.classList.add('disabled');
+            backBtn.title = 'Gallery link not found on this page';
+        }
 
         document.addEventListener('keydown', e => {
             // Never hijack browser shortcuts such as Ctrl+D or Alt+Arrow.
@@ -3680,6 +4114,12 @@
                     e.preventDefault(); navigate(1); break;
                 case 's': case 'S':
                     e.preventDefault(); startDownload(); break;
+                case 'Backspace':
+                    if (backBtn.href && backBtn.href !== '#' && !backBtn.classList.contains('disabled')) {
+                        e.preventDefault();
+                        location.assign(backBtn.href);
+                    }
+                    break;
                 case 'Escape':
                     if (activeReq) { try { activeReq.abort(); } catch { /* gone */ } }
                     break;
@@ -4082,6 +4522,19 @@
     // kept here so the notice can also answer "what changed before this?".
     // =====================================================================
     const CHANGELOG = [
+        { v: '15.6.0', groups: [
+            { t: 'Added', items: [
+                'Favourites index. Read your own favourites once, and every listing then marks the galleries you already have, with the category name. It reads only HTML, so it costs no image quota. Build it from Settings.',
+                'Back to gallery button in the image viewer, also on Backspace.'
+            ] },
+            { t: 'Changed', items: [
+                'The interface now samples its colours from the page it is on, instead of guessing a light or dark palette. On e-hentai\'s cream skin the bar had been rendering near-white with grey rules; it now picks up the site\'s own cream and dark red.',
+                'The viewer bar floats at the top of the window, so it stays put while you scroll a page.'
+            ] },
+            { t: 'Fixed', items: [
+                'Page turns that needed two or three clicks. The guard read the page counter first and silently gave up whenever it could not parse one, which happens during the site\'s in-place page swap; it now fails open and falls back to a real navigation if the site\'s own handler does not take over.'
+            ] }
+        ] },
         { v: '15.5.0', groups: [
             { t: 'Fixed', items: [
                 'Page counter and file numbering on galleries whose files are named 001.jpg. The counter div and the filename div sit side by side in the page markup, and reading them together turned "6 / 129" into "6 / 129006" — which also padded saved filenames to four digits instead of three.'
@@ -4211,6 +4664,7 @@
     // =====================================================================
     function bootstrap() {
         const path = location.pathname;
+        try { applySampledPalette(SITE_THEME); } catch (err) { console.warn('[ExHD] palette sampling failed', err); }
         applyButtonPlacement();
         try {
             if (path.startsWith('/s/')) {
@@ -4222,6 +4676,12 @@
             } else if ($$('a[href*="/g/"]').length) {
                 buildFrontPageBar();
                 initFrontPagePeeker();
+            }
+
+            // Mark anything already in the collection, on every page that
+            // lists galleries — including the gallery page itself.
+            if (!path.startsWith('/s/')) {
+                try { Favorites.markListings(); } catch (err) { console.warn('[ExHD] fav marks failed', err); }
             }
         } catch (err) {
             console.error('[ExHD] initialisation failed', err);
