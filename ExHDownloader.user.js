@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ExHentai Absolute Proof Downloader (Visible Timer & Viewer Support)
 // @namespace    http://tampermonkey.net/
-// @version      15.0.0
+// @version      15.1.0
 // @description  Original-quality downloader for E-Hentai / ExHentai. Persistent download memory, resilient retrying queue with 509 quota detection, correct file extensions, a zero-layout-thrash animated thumbnail engine with true canvas freezing, Ctrl+Hover full image preview, gallery peeker, live image limit counter, and theme-matched native UI.
 // @author       Nyashers
 // @license      GPL-3.0
@@ -25,7 +25,7 @@
 (function () {
     'use strict';
 
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.0.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '15.1.0';
     const REPO_URL = 'https://github.com/Nyashers/ExHDownloader';
 
     // =====================================================================
@@ -214,15 +214,22 @@
         }
 
         /* ---------- Per-thumbnail download button ---------- */
+        /* Placement runs through custom properties rather than override rules.
+           This selector carries ID specificity, so any variant written as
+           :root[...] .eh-dl-btn would lose the cascade no matter how many
+           !important flags it used. Inherited variables sidestep that. */
         .eh-dl-btn, #gdt .eh-dl-btn {
             position: absolute !important;
-            bottom: 4px !important; left: 50% !important;
-            transform: translateX(-50%) !important;
+            top:    var(--eh-btn-top, auto) !important;
+            bottom: var(--eh-btn-bottom, 4px) !important;
+            left:   var(--eh-btn-left, 50%) !important;
+            right:  var(--eh-btn-right, auto) !important;
+            transform: var(--eh-btn-tf, translateX(-50%)) !important;
             z-index: 20 !important;
-            width: calc(100% - 10px) !important;
-            max-width: 150px !important;
+            width: var(--eh-btn-w, calc(100% - 10px)) !important;
+            max-width: var(--eh-btn-maxw, 150px) !important;
             height: 20px !important;
-            padding: 0 4px !important;
+            padding: 0 var(--eh-btn-padx, 4px) !important;
             box-sizing: border-box !important;
             background: rgba(30, 31, 35, 0.92) !important;
             color: #edebdf !important;
@@ -233,7 +240,7 @@
             font-weight: bold !important;
             line-height: 1 !important;
             cursor: pointer !important;
-            opacity: 0.9;
+            opacity: var(--eh-btn-opacity, .9);
             transition: background .15s, opacity .15s, border-color .15s !important;
             display: flex !important;
             align-items: center !important;
@@ -242,7 +249,7 @@
             white-space: nowrap !important;
             text-overflow: ellipsis !important;
         }
-        .eh-dl-btn:hover { background: rgba(46, 204, 113, .92) !important; color: #fff !important; border-color: var(--eh-ok) !important; opacity: 1; }
+        .eh-dl-btn:hover { background: rgba(46, 204, 113, .92) !important; color: #fff !important; border-color: var(--eh-ok) !important; --eh-btn-opacity: 1; }
         .eh-dl-btn.state-saved, #gdt .eh-dl-btn.state-saved {
             background: rgba(22, 64, 36, .95) !important; color: var(--eh-ok-dim) !important; border-color: #27ae60 !important;
         }
@@ -320,6 +327,108 @@
             box-shadow: 0 1px 3px rgba(0,0,0,.75) !important; user-select: none !important;
         }
         .eh-anim-badge.is-frozen { background: rgba(90, 95, 105, .92) !important; }
+
+        /* ---------- Download button placement ---------- */
+        /* One attribute on <html> restyles every button at once, so changing
+           the setting costs nothing per thumbnail. */
+        :root[data-eh-btnpos="top"] { --eh-btn-top: 4px; --eh-btn-bottom: auto; }
+        :root[data-eh-btnpos="tl"], :root[data-eh-btnpos="tr"], :root[data-eh-btnpos="br"] {
+            --eh-btn-w: auto; --eh-btn-maxw: 78%; --eh-btn-padx: 7px; --eh-btn-tf: none;
+        }
+        :root[data-eh-btnpos="tl"] { --eh-btn-top: 4px; --eh-btn-bottom: auto; --eh-btn-left: 4px;  --eh-btn-right: auto; }
+        :root[data-eh-btnpos="tr"] { --eh-btn-top: 4px; --eh-btn-bottom: auto; --eh-btn-left: auto; --eh-btn-right: 4px; }
+        :root[data-eh-btnpos="br"] { --eh-btn-top: auto; --eh-btn-bottom: 4px; --eh-btn-left: auto; --eh-btn-right: 4px; }
+
+        /* Reveal-on-hover keeps the grid clean without hiding live state:
+           a button that is queued, downloading or failed always shows. */
+        :root[data-eh-btnhover="1"] { --eh-btn-opacity: 0; }
+        :root[data-eh-btnhover="1"] #gdt a:hover { --eh-btn-opacity: .95; }
+        .eh-dl-btn.state-queued, .eh-dl-btn.state-scan,
+        .eh-dl-btn.state-dl, .eh-dl-btn.state-err { --eh-btn-opacity: .95; }
+        .eh-dl-btn:focus-visible { --eh-btn-opacity: 1; }
+
+        /* ---------- Animation progress badge ---------- */
+        .eh-anim-status-badge { gap: 8px; }
+        .eh-anim-bar {
+            position: relative; width: 62px; height: 5px;
+            border-radius: 3px; background: rgba(0, 0, 0, .45);
+            overflow: hidden; flex-shrink: 0;
+        }
+        .eh-anim-bar > i {
+            position: absolute; top: 0; bottom: 0; left: 0; width: 0;
+            background: linear-gradient(90deg, #1f8a4d, var(--eh-ok));
+            transition: width .25s ease;
+        }
+        .eh-anim-count { font-variant-numeric: tabular-nums; font-weight: bold; color: #fff; }
+        .eh-anim-pages { opacity: .8; font-variant-numeric: tabular-nums; }
+        .eh-anim-status-badge.is-done {
+            border-color: var(--eh-line); background: var(--eh-panel-sunken); color: var(--eh-text-dim);
+        }
+        .eh-anim-status-badge.is-done .eh-anim-count { color: var(--eh-text); }
+        .eh-anim-status-badge.is-error { border-color: var(--eh-danger); background: rgba(90,25,25,.5); color: #ffb3aa; }
+
+        /* ---------- Settings panel ---------- */
+        #eh-settings-panel {
+            position: fixed; top: 0; left: 0; z-index: 100001;
+            width: 330px; max-width: calc(100vw - 24px);
+            background: var(--eh-panel); border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius); box-shadow: 0 10px 34px var(--eh-shadow);
+            font-family: var(--eh-font); font-size: 12px; color: var(--eh-text);
+            display: none; box-sizing: border-box;
+        }
+        #eh-settings-panel.is-open { display: block; animation: ehFadeScaleIn .14s ease-out; }
+        .eh-set-head {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 8px 10px; background: var(--eh-panel-raised);
+            border-bottom: 1px solid var(--eh-line); font-weight: bold;
+        }
+        .eh-set-close {
+            background: none; border: none; color: var(--eh-text-dim);
+            font-size: 15px; cursor: pointer; line-height: 1; padding: 0 2px;
+        }
+        .eh-set-close:hover { color: var(--eh-text-strong); }
+        .eh-set-body { padding: 11px 12px 12px; display: flex; flex-direction: column; gap: 13px; }
+        .eh-set-row { display: flex; flex-direction: column; gap: 7px; }
+        .eh-set-label {
+            font-size: 10px; color: var(--eh-text-dim); font-weight: bold;
+            text-transform: uppercase; letter-spacing: .5px;
+        }
+        .eh-set-note { font-size: 10px; color: var(--eh-text-dim); line-height: 1.45; }
+        .eh-set-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+
+        /* Each option draws a miniature thumbnail with the button in place. */
+        .eh-pos-opt {
+            position: relative; height: 38px; border: 1px solid var(--eh-line);
+            border-radius: 2px; background: var(--eh-panel-sunken);
+            cursor: pointer; transition: border-color .15s, background .15s;
+        }
+        .eh-pos-opt:hover { border-color: var(--eh-line-lit); }
+        .eh-pos-opt.is-active { border-color: #27ae60; background: var(--eh-ok-deep); }
+        .eh-pos-opt > i {
+            position: absolute; display: block; height: 6px;
+            border-radius: 1px; background: var(--eh-line-lit);
+        }
+        .eh-pos-opt.is-active > i { background: var(--eh-ok); }
+        .eh-pos-opt[data-pos="bottom"] > i { left: 15%; right: 15%; bottom: 4px; }
+        .eh-pos-opt[data-pos="top"]    > i { left: 15%; right: 15%; top: 4px; }
+        .eh-pos-opt[data-pos="tl"]     > i { left: 4px; width: 45%; top: 4px; }
+        .eh-pos-opt[data-pos="tr"]     > i { right: 4px; width: 45%; top: 4px; }
+        .eh-pos-opt[data-pos="br"]     > i { right: 4px; width: 45%; bottom: 4px; }
+
+        .eh-set-inline { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .eh-set-inline > span { font-size: 11px; }
+        .eh-set-range { display: flex; align-items: center; gap: 8px; }
+        .eh-set-range input[type="range"] { flex: 1; accent-color: var(--eh-ok); height: 4px; }
+        .eh-set-range output {
+            min-width: 22px; text-align: right; font-variant-numeric: tabular-nums;
+            font-weight: bold; color: var(--eh-ok-dim);
+        }
+        .eh-set-danger {
+            background: #5c1f1f; border: 1px solid #7d2b2b; color: #f0c8c8;
+            border-radius: var(--eh-radius); height: 24px; font-size: 11px; font-weight: bold;
+            font-family: var(--eh-font); cursor: pointer;
+        }
+        .eh-set-danger:hover { background: #822e2e; color: #fff; }
 
         /* ---------- Download manager ---------- */
         #eh-dl-manager {
@@ -433,19 +542,29 @@
         }
         .eh-viewer-cancel-btn:hover { background: #822e2e; color: #fff; }
 
-        /* ---------- Ctrl+Hover image preview ---------- */
-        #eh-image-preview-popup {
+        /* ---------- Floating popovers ---------- */
+        /* The outer shell owns nothing but the cursor position. A CSS
+           animation outranks inline styles, so the entrance effect has to
+           live on an inner element -- put it on the shell and it overwrites
+           the transform that follows the mouse, freezing the popup in place. */
+        #eh-image-preview-popup, #eh-gallery-peek-popup {
             position: fixed; top: 0; left: 0; z-index: 100000;
-            background: var(--eh-panel); border: 1px solid var(--eh-line);
-            border-radius: var(--eh-radius); padding: 8px;
+            display: none; pointer-events: none; will-change: transform;
+        }
+        #eh-image-preview-popup.is-open, #eh-gallery-peek-popup.is-open { display: block; }
+        .eh-pop-inner {
+            background: var(--eh-panel);
+            border: 1px solid var(--eh-line);
+            border-radius: var(--eh-radius);
             box-shadow: 0 8px 30px var(--eh-shadow);
-            display: none; flex-direction: column; align-items: center; justify-content: center;
-            pointer-events: none; box-sizing: border-box;
-            max-width: 92vw; max-height: 88vh;
-            will-change: transform;
+            box-sizing: border-box;
             animation: ehFadeScaleIn .16s cubic-bezier(.16,1,.3,1) forwards;
         }
-        #eh-image-preview-popup.is-open { display: flex; }
+        #eh-image-preview-popup .eh-pop-inner {
+            padding: 8px; display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            max-width: 92vw; max-height: 88vh;
+        }
         .eh-preview-stage {
             position: relative; display: flex; align-items: center; justify-content: center;
             background: var(--eh-panel-sunken); border-radius: 2px; overflow: hidden;
@@ -471,17 +590,10 @@
         .eh-preview-caption b { color: var(--eh-ok-dim); }
 
         /* ---------- Gallery peeker ---------- */
-        #eh-gallery-peek-popup {
-            position: fixed; top: 0; left: 0; z-index: 100000;
-            background: var(--eh-panel); border: 1px solid var(--eh-line);
-            border-radius: var(--eh-radius); padding: 10px;
-            box-shadow: 0 8px 32px var(--eh-shadow);
-            display: none; width: 470px; max-width: 95vw; box-sizing: border-box;
+        #eh-gallery-peek-popup .eh-pop-inner {
+            padding: 10px; width: 470px; max-width: 95vw;
             font-family: var(--eh-font); color: var(--eh-text); font-size: 11px;
-            pointer-events: none; will-change: transform;
-            animation: ehFadeScaleIn .16s cubic-bezier(.16,1,.3,1) forwards;
         }
-        #eh-gallery-peek-popup.is-open { display: block; }
         .eh-peek-header {
             font-weight: bold; font-size: 12px; color: var(--eh-text-strong);
             margin-bottom: 6px; line-height: 1.3;
@@ -637,6 +749,35 @@
 
     function setSetting(key, val) { rawSet(key, val); }
 
+    // Defaults in one place so the panel and the consumers cannot drift.
+    const DEFAULTS = {
+        eh_open_in_new_tab: true,
+        eh_gallery_peeker: true,
+        eh_live_thumbs: false,
+        eh_btn_pos: 'bottom',
+        eh_btn_hover: false,
+        eh_anim_play_budget: 4,
+        eh_anim_concurrency: 2
+    };
+
+    const pref = key => getSetting(key, DEFAULTS[key]);
+
+    const BUTTON_POSITIONS = [
+        { id: 'bottom', label: 'Bottom bar' },
+        { id: 'top',    label: 'Top bar' },
+        { id: 'tl',     label: 'Top left' },
+        { id: 'tr',     label: 'Top right' },
+        { id: 'br',     label: 'Bottom right' }
+    ];
+
+    /** Placement is pure CSS: flip two attributes and every button moves. */
+    function applyButtonPlacement() {
+        const root = document.documentElement;
+        const pos = pref('eh_btn_pos');
+        root.setAttribute('data-eh-btnpos', BUTTON_POSITIONS.some(p => p.id === pos) ? pos : 'bottom');
+        root.setAttribute('data-eh-btnhover', pref('eh_btn_hover') ? '1' : '0');
+    }
+
     const History = (() => {
         let cache = null;
         let dirty = false;
@@ -687,6 +828,24 @@
                 g[String(page)] = { time: Date.now(), res: meta.res || '', size: meta.size || '' };
                 scheduleFlush();
             },
+            clearGallery(gid) {
+                if (!gid) return 0;
+                const db = load();
+                const n = Object.keys(db[String(gid)] || {}).length;
+                delete db[String(gid)];
+                scheduleFlush();
+                flush();
+                return n;
+            },
+            clearAll() {
+                const db = load();
+                const n = Object.keys(db).length;
+                for (const k of Object.keys(db)) delete db[k];
+                scheduleFlush();
+                flush();
+                return n;
+            },
+            galleryCount() { return Object.keys(load()).length; },
             flush
         };
     })();
@@ -1194,20 +1353,78 @@
         }
 
         // ---------- status badge ----------
-        function renderStatus() {
+        // Built once, then updated field by field: rebuilding innerHTML on
+        // every tick would restart the progress bar's CSS transition and
+        // make it stutter instead of sliding.
+        let totalAnimated = 0;
+        let pausedReason = null;
+
+        function badgeParts() {
             const badge = $('#eh-anim-status');
-            if (!badge) return;
-            const busy = active.size;
-            const waiting = queue.length;
-            if (!busy && !waiting) { badge.style.display = 'none'; return; }
+            if (!badge) return null;
+            if (badge.dataset.built !== '1') {
+                badge.innerHTML =
+                    '<span class="eh-anim-icon">⏳</span>' +
+                    '<span class="eh-anim-bar"><i></i></span>' +
+                    '<span class="eh-anim-count"></span>' +
+                    '<span class="eh-anim-pages"></span>';
+                badge.dataset.built = '1';
+            }
+            return {
+                badge,
+                icon: badge.querySelector('.eh-anim-icon'),
+                fill: badge.querySelector('.eh-anim-bar > i'),
+                count: badge.querySelector('.eh-anim-count'),
+                pages: badge.querySelector('.eh-anim-pages')
+            };
+        }
 
-            const pages = Array.from(active).map(s => s.index).sort((a, b) => a - b);
-            let label = 'Loading animation';
-            if (pages.length) label += ` · p.${pages.join(', ')}`;
-            if (waiting) label += ` · +${waiting} queued`;
+        function renderStatus() {
+            const p = badgeParts();
+            if (!p) return;
 
-            badge.style.display = 'inline-flex';
-            badge.innerHTML = `<span class="eh-anim-spin-icon">⏳</span><span>🎬 ${label}</span>`;
+            if (!totalAnimated) { p.badge.style.display = 'none'; return; }
+
+            let done = 0;
+            let errored = 0;
+            for (const st of states.values()) {
+                if (!st.isAnimated) continue;
+                if (st.status === 'ready') done++;
+                else if (st.status === 'error') { done++; errored++; }
+            }
+
+            const pct = Math.round((done / totalAnimated) * 100);
+            const finished = done >= totalAnimated;
+            const busyPages = Array.from(active).map(s => s.index).sort((a, b) => a - b);
+
+            p.badge.style.display = 'inline-flex';
+            p.badge.classList.toggle('is-done', finished && !pausedReason);
+            p.badge.classList.toggle('is-error', !!pausedReason || (finished && errored > 0));
+
+            p.icon.textContent = pausedReason ? '⚠' : finished ? '🎬' : '⏳';
+            p.icon.classList.toggle('eh-anim-spin-icon', !finished && !pausedReason && active.size > 0);
+
+            p.fill.style.width = pct + '%';
+            p.count.textContent = `${done} / ${totalAnimated}`;
+
+            if (pausedReason) {
+                p.pages.textContent = pausedReason;
+            } else if (busyPages.length) {
+                const shown = busyPages.slice(0, 3).join(', ');
+                p.pages.textContent = `p.${shown}` + (queue.length ? ` · +${queue.length}` : '');
+            } else if (queue.length) {
+                p.pages.textContent = `+${queue.length} queued`;
+            } else if (finished) {
+                p.pages.textContent = errored ? `${errored} failed` : 'ready';
+            } else {
+                p.pages.textContent = '';
+            }
+
+            p.badge.title = pausedReason
+                ? pausedReason
+                : `${done} of ${totalAnimated} animated thumbnails loaded` +
+                  (errored ? `, ${errored} failed` : '') +
+                  (queue.length ? `, ${queue.length} waiting` : '');
         }
 
         // ---------- fetch queue ----------
@@ -1498,6 +1715,13 @@
                 });
             });
 
+            totalAnimated = 0;
+            for (const st of states.values()) if (st.isAnimated) totalAnimated++;
+            pausedReason = null;
+
+            CONFIG.playBudget = clamp(pref('eh_anim_play_budget'), 1, 12);
+            CONFIG.maxConcurrentFetch = clamp(pref('eh_anim_concurrency'), 1, 4);
+
             measureLayout();
 
             io = new IntersectionObserver(entries => {
@@ -1522,7 +1746,7 @@
             renderStatus();
         }
 
-        function disable({ keepSetting = false } = {}) {
+        function disable() {
             if (!enabled) return;
             enabled = false;
 
@@ -1545,7 +1769,10 @@
 
             states.clear();
             pinnedState = null;
-            if (!keepSetting) renderStatus();
+            totalAnimated = 0;
+            pausedReason = null;
+            const badge = $('#eh-anim-status');
+            if (badge) { badge.style.display = 'none'; delete badge.dataset.built; }
         }
 
         /**
@@ -1559,12 +1786,15 @@
             clearTimeout(pumpTimer);
             pumpTimer = null;
             if (io) { io.disconnect(); io = null; }
+            pausedReason = reason;
+            renderStatus();
+        }
 
-            const badge = $('#eh-anim-status');
-            if (badge) {
-                badge.style.display = 'inline-flex';
-                badge.innerHTML = `<span>⚠ ${reason}</span>`;
-            }
+        /** Live-apply the budget sliders without reloading the grid. */
+        function setConfig({ playBudget, concurrency }) {
+            if (playBudget != null) CONFIG.playBudget = clamp(playBudget, 1, 12);
+            if (concurrency != null) CONFIG.maxConcurrentFetch = clamp(concurrency, 1, 4);
+            if (enabled) { updateBudget(); pump(); }
         }
 
         function countAnimatedCandidates() {
@@ -1575,7 +1805,10 @@
             return n;
         }
 
-        return { enable, disable, countAnimatedCandidates, get isEnabled() { return enabled; } };
+        return {
+            enable, disable, setConfig, countAnimatedCandidates,
+            get isEnabled() { return enabled; }
+        };
     })();
     // =====================================================================
     // === DOWNLOAD QUEUE ==================================================
@@ -2052,6 +2285,204 @@
         tasks.forEach(DownloadQueue.push);
     }
 
+    // =====================================================================
+    // === SETTINGS PANEL ==================================================
+    // =====================================================================
+    const SettingsPanel = (() => {
+        let panel = null;
+
+        function checkboxRow(id, label, checked, title) {
+            return `<label class="eh-checkbox-label${checked ? ' is-on' : ''}" title="${title || ''}" style="width:100%;box-sizing:border-box;">
+                        <input type="checkbox" id="${id}" ${checked ? 'checked' : ''}>
+                        <span>${label}</span>
+                    </label>`;
+        }
+
+        function rangeRow(id, label, value, min, max) {
+            return `<div class="eh-set-inline">
+                        <span>${label}</span>
+                        <div class="eh-set-range" style="max-width:150px;">
+                            <input type="range" id="${id}" min="${min}" max="${max}" step="1" value="${value}">
+                            <output for="${id}">${value}</output>
+                        </div>
+                    </div>`;
+        }
+
+        function build() {
+            const onGallery = !!$('#gdt');
+            const gid = getGalleryIdFromLocation();
+            const savedHere = Object.keys(History.forGallery(gid)).length;
+
+            panel = document.createElement('div');
+            panel.id = 'eh-settings-panel';
+            panel.innerHTML = `
+                <div class="eh-set-head">
+                    <span>⚙ ExH Downloader settings</span>
+                    <button type="button" class="eh-set-close" id="eh-set-close" title="Close">✕</button>
+                </div>
+                <div class="eh-set-body">
+                    ${onGallery ? `
+                    <div class="eh-set-row">
+                        <div class="eh-set-label">Download button</div>
+                        <div class="eh-set-grid" id="eh-pos-grid">
+                            ${BUTTON_POSITIONS.map(p => `
+                                <div class="eh-pos-opt${pref('eh_btn_pos') === p.id ? ' is-active' : ''}"
+                                     data-pos="${p.id}" title="${p.label}" role="button" tabindex="0"><i></i></div>`).join('')}
+                        </div>
+                        ${checkboxRow('eh-set-btn-hover', 'Show only when hovering a thumbnail',
+                                      pref('eh_btn_hover'),
+                                      'Buttons stay hidden until you hover. Active downloads always stay visible.')}
+                    </div>` : ''}
+
+                    <div class="eh-set-row">
+                        <div class="eh-set-label">Browsing</div>
+                        ${checkboxRow('eh-set-newtab', 'Open links in a new tab', pref('eh_open_in_new_tab'))}
+                        ${onGallery ? '' : checkboxRow('eh-set-peek', 'Gallery peeker on hover', pref('eh_gallery_peeker'))}
+                    </div>
+
+                    ${onGallery ? `
+                    <div class="eh-set-row">
+                        <div class="eh-set-label">Animated thumbnails</div>
+                        ${rangeRow('eh-set-play', 'Playing at once', pref('eh_anim_play_budget'), 1, 12)}
+                        ${rangeRow('eh-set-conc', 'Parallel lookups', pref('eh_anim_concurrency'), 1, 4)}
+                        <div class="eh-set-note">Fewer playing at once means less CPU and GPU load.
+                        Loading these images spends your image limit, so keep parallel lookups low.</div>
+                    </div>` : ''}
+
+                    <div class="eh-set-row">
+                        <div class="eh-set-label">Download memory</div>
+                        <div class="eh-set-note" id="eh-set-hist">
+                            ${savedHere} page(s) remembered here · ${History.galleryCount()} gallery(ies) total
+                        </div>
+                        <div style="display:flex;gap:6px;">
+                            ${gid ? '<button type="button" class="eh-set-danger" id="eh-set-forget" style="flex:1;">Forget this gallery</button>' : ''}
+                            <button type="button" class="eh-set-danger" id="eh-set-forget-all" style="flex:1;">Clear all</button>
+                        </div>
+                    </div>
+                </div>`;
+            document.body.appendChild(panel);
+            wire(gid);
+        }
+
+        function wire(gid) {
+            $('#eh-set-close', panel).addEventListener('click', close);
+
+            const grid = $('#eh-pos-grid', panel);
+            if (grid) {
+                const pick = el => {
+                    if (!el) return;
+                    setSetting('eh_btn_pos', el.dataset.pos);
+                    applyButtonPlacement();
+                    $$('.eh-pos-opt', grid).forEach(o => o.classList.toggle('is-active', o === el));
+                };
+                grid.addEventListener('click', e => pick(e.target.closest('.eh-pos-opt')));
+                grid.addEventListener('keydown', e => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        pick(e.target.closest('.eh-pos-opt'));
+                    }
+                });
+            }
+
+            const bindCheck = (id, key, after) => {
+                const cb = $('#' + id, panel);
+                if (!cb) return;
+                cb.addEventListener('change', e => {
+                    setSetting(key, e.target.checked);
+                    e.target.closest('.eh-checkbox-label').classList.toggle('is-on', e.target.checked);
+                    if (after) after(e.target.checked);
+                });
+            };
+            bindCheck('eh-set-btn-hover', 'eh_btn_hover', applyButtonPlacement);
+            bindCheck('eh-set-newtab', 'eh_open_in_new_tab', on => {
+                applyNewTabBehavior(on);
+                const mirror = $('#eh-setting-new-tab');
+                if (mirror) {
+                    mirror.checked = on;
+                    mirror.closest('.eh-checkbox-label').classList.toggle('is-on', on);
+                }
+            });
+            bindCheck('eh-set-peek', 'eh_gallery_peeker', on => {
+                peekerEnabled = on;
+                const mirror = $('#eh-setting-peeker');
+                if (mirror) {
+                    mirror.checked = on;
+                    mirror.closest('.eh-checkbox-label').classList.toggle('is-on', on);
+                }
+            });
+
+            const bindRange = (id, key, apply) => {
+                const input = $('#' + id, panel);
+                if (!input) return;
+                input.addEventListener('input', e => {
+                    const v = parseInt(e.target.value, 10);
+                    panel.querySelector(`output[for="${id}"]`).textContent = v;
+                    setSetting(key, v);
+                    apply(v);
+                });
+            };
+            bindRange('eh-set-play', 'eh_anim_play_budget', v => LiveThumbs.setConfig({ playBudget: v }));
+            bindRange('eh-set-conc', 'eh_anim_concurrency', v => LiveThumbs.setConfig({ concurrency: v }));
+
+            const forget = $('#eh-set-forget', panel);
+            if (forget) {
+                forget.addEventListener('click', () => {
+                    const n = Object.keys(History.forGallery(gid)).length;
+                    if (!confirm(`Forget ${n} remembered page(s) for this gallery?`)) return;
+                    History.clearGallery(gid);
+                    refreshGallerySavedStats();
+                    refreshHistoryNote(gid);
+                });
+            }
+            $('#eh-set-forget-all', panel).addEventListener('click', () => {
+                if (!confirm('Clear the download memory for every gallery? This cannot be undone.')) return;
+                History.clearAll();
+                refreshGallerySavedStats();
+                refreshHistoryNote(gid);
+            });
+        }
+
+        function refreshHistoryNote(gid) {
+            const note = $('#eh-set-hist', panel);
+            if (!note) return;
+            note.textContent =
+                `${Object.keys(History.forGallery(gid)).length} page(s) remembered here · ${History.galleryCount()} gallery(ies) total`;
+        }
+
+        function place(anchor) {
+            const r = anchor.getBoundingClientRect();
+            const w = panel.offsetWidth || 330;
+            const h = panel.offsetHeight || 300;
+            panel.style.left = Math.round(clamp(r.left, 8, innerWidth - w - 8)) + 'px';
+            panel.style.top = Math.round(
+                r.bottom + 6 + h > innerHeight - 8 ? Math.max(8, r.top - h - 6) : r.bottom + 6
+            ) + 'px';
+        }
+
+        function close() {
+            if (panel) panel.classList.remove('is-open');
+            document.removeEventListener('pointerdown', onOutside, true);
+        }
+
+        function onOutside(e) {
+            if (panel.contains(e.target) || e.target.closest('#eh-settings-btn')) return;
+            close();
+        }
+
+        function toggle(anchor) {
+            if (!panel) build();
+            if (panel.classList.contains('is-open')) { close(); return; }
+            panel.classList.add('is-open');
+            place(anchor);
+            document.addEventListener('pointerdown', onOutside, true);
+            document.addEventListener('keydown', function esc(e) {
+                if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+            });
+        }
+
+        return { toggle };
+    })();
+
     function buildGalleryBar() {
         const gdt = $('#gdt');
         if (!gdt || $('#eh-top-control-bar')) return;
@@ -2088,9 +2519,13 @@
                 </div>
             </div>
             <div class="eh-top-right">
-                <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer" title="Project page">ExH Downloader v${VERSION}</a>
+                <button type="button" id="eh-settings-btn" class="eh-top-btn" title="Settings">⚙</button>
+                <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer" title="Project page">v${VERSION}</a>
             </div>`;
         gdt.parentNode.insertBefore(bar, gdt);
+
+        const gear = $('#eh-settings-btn', bar);
+        gear.addEventListener('click', () => SettingsPanel.toggle(gear));
 
         $('#eh-batch-dl-btn', bar).addEventListener('click', downloadAllOnPage);
         $('#eh-cancel-all-btn', bar).addEventListener('click', DownloadQueue.cancelAll);
@@ -2193,11 +2628,13 @@
         const popup = document.createElement('div');
         popup.id = 'eh-image-preview-popup';
         popup.innerHTML = `
-            <div class="eh-preview-stage" id="eh-preview-stage">
-                <img id="eh-preview-img" alt="">
-                <div id="eh-preview-spin" class="eh-preview-spinner">⟳ loading…</div>
-            </div>
-            <div id="eh-preview-caption" class="eh-preview-caption"></div>`;
+            <div class="eh-pop-inner">
+                <div class="eh-preview-stage" id="eh-preview-stage">
+                    <img id="eh-preview-img" alt="">
+                    <div id="eh-preview-spin" class="eh-preview-spinner">⟳ loading…</div>
+                </div>
+                <div id="eh-preview-caption" class="eh-preview-caption"></div>
+            </div>`;
         document.body.appendChild(popup);
 
         const stage = $('#eh-preview-stage', popup);
@@ -2580,10 +3017,12 @@
         const popup = document.createElement('div');
         popup.id = 'eh-gallery-peek-popup';
         popup.innerHTML = `
-            <div id="eh-peek-title" class="eh-peek-header">Loading…</div>
-            <div id="eh-peek-meta" class="eh-peek-meta"><span>fetching info…</span></div>
-            <div id="eh-peek-tags" class="eh-peek-tags"></div>
-            <div id="eh-peek-grid" class="eh-peek-grid"></div>`;
+            <div class="eh-pop-inner">
+                <div id="eh-peek-title" class="eh-peek-header">Loading…</div>
+                <div id="eh-peek-meta" class="eh-peek-meta"><span>fetching info…</span></div>
+                <div id="eh-peek-tags" class="eh-peek-tags"></div>
+                <div id="eh-peek-grid" class="eh-peek-grid"></div>
+            </div>`;
         document.body.appendChild(popup);
 
         const titleEl = $('#eh-peek-title', popup);
@@ -2791,9 +3230,13 @@
                 </div>
             </div>
             <div class="eh-top-right">
+                <button type="button" id="eh-settings-btn" class="eh-top-btn" title="Settings">⚙</button>
                 <a href="${REPO_URL}" target="_blank" rel="noopener noreferrer">ExH Downloader v${VERSION}</a>
             </div>`;
         anchor.parentNode.insertBefore(bar, anchor);
+
+        const gear = $('#eh-settings-btn', bar);
+        gear.addEventListener('click', () => SettingsPanel.toggle(gear));
 
         const newTabCb = $('#eh-setting-new-tab', bar);
         newTabCb.addEventListener('change', e => {
@@ -2818,6 +3261,7 @@
     // =====================================================================
     function bootstrap() {
         const path = location.pathname;
+        applyButtonPlacement();
         try {
             if (path.startsWith('/s/')) {
                 initViewerPage();
